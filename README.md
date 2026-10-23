@@ -86,6 +86,11 @@ If you care about **speed, reliability, and control**, DLMan is for you.
 - Credential prompt on 401/403 failures with retry
 - Manage saved logins in Settings
 
+### YouTube Videos and MP3
+- Public videos and Shorts with quality selection and merged audio/video
+- MP3 conversion through the existing browser video button and Add Download dialog
+- Bundled extraction tools for all desktop release targets; see [YouTube support](docs/youtube-support.md)
+
 ### 🎨 Interface
 - Modern, clean UI
 - Dark and light themes

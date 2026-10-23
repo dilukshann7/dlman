@@ -3,6 +3,9 @@
 //! This crate contains all the shared data structures used across
 //! the desktop app, CLI, and core library.
 
+mod youtube;
+pub use youtube::*;
+
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -38,6 +41,9 @@ pub struct Download {
     /// Format: "name1=value1; name2=value2" (standard HTTP Cookie header format)
     #[serde(default)]
     pub cookies: Option<String>,
+    /// Optional provider job data, parsed independently for each download.
+    #[serde(default)]
+    pub youtube: Option<serde_json::Value>,
 }
 
 impl Download {
@@ -67,6 +73,7 @@ impl Download {
             completed_at: None,
             retry_count: 0,
             cookies: None,
+            youtube: None,
         }
     }
 
@@ -621,6 +628,8 @@ pub enum MediaProtocol {
     Hls,
     /// Dynamic Adaptive Streaming over HTTP (.mpd)
     Dash,
+    /// Public individual YouTube video, resolved by bundled tools.
+    Youtube,
 }
 
 /// A single variant/quality of a detected media stream
@@ -677,6 +686,10 @@ pub struct DetectedMedia {
 /// Request from extension to download a media stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaDownloadRequest {
+    #[serde(default)]
+    pub youtube_selection: Option<YoutubeSelection>,
+    #[serde(default)]
+    pub inspection_id: Option<Uuid>,
     /// The detected media info
     pub media: DetectedMedia,
     /// Index of chosen variant (None = best quality)

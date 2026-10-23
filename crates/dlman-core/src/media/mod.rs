@@ -18,6 +18,7 @@
 //! ```
 
 pub mod hls;
+pub mod youtube;
 pub mod dash;
 
 use crate::error::DlmanError;
@@ -88,6 +89,7 @@ impl MediaResolver {
         let headers = self.build_headers(media);
 
         match media.protocol {
+            MediaProtocol::Youtube => Err(DlmanError::InvalidOperation("Use YouTube inspection and the managed transfer service.".into())),
             MediaProtocol::Direct => {
                 // Direct files have exactly one "variant"
                 Ok(vec![MediaVariant {
@@ -121,6 +123,7 @@ impl MediaResolver {
         let headers = self.build_headers(media);
 
         match media.protocol {
+            MediaProtocol::Youtube => Err(DlmanError::InvalidOperation("Use YouTube inspection and the managed transfer service.".into())),
             MediaProtocol::Direct => Ok(vec![variant.url.clone()]),
             MediaProtocol::Hls => {
                 let handler = hls::HlsHandler::new(self.http_client.clone());

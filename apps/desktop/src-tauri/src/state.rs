@@ -18,8 +18,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(data_dir: PathBuf) -> Result<Self, dlman_core::DlmanError> {
-        let core = DlmanCore::new(data_dir.clone()).await?;
+    pub async fn new(data_dir: PathBuf, media_tools: Option<PathBuf>) -> Result<Self, dlman_core::DlmanError> {
+        let core = DlmanCore::new_with_media_tools(data_dir.clone(), media_tools).await?;
 
         Ok(Self {
             core: Arc::new(RwLock::new(Some(core))),

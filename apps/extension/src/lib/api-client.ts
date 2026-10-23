@@ -356,6 +356,14 @@ export class DlmanClient {
    * For direct files, opens the download dialog.
    * For HLS/DASH, the core engine handles segment download and merge.
    */
+  async inspectYoutube(url: string) {
+    return this.httpRequest<import('../../../../shared/youtube.mjs').YoutubeInspection>('POST', '/api/media/inspect', { url });
+  }
+
+  async youtubeInspection(id: string) {
+    return this.httpRequest<import('../../../../shared/youtube.mjs').YoutubeInspection>('GET', `/api/media/inspect/${encodeURIComponent(id)}`);
+  }
+
   async downloadMedia(request: MediaDownloadRequest): Promise<MediaDownloadResponse> {
     try {
       return await this.httpRequest<MediaDownloadResponse>('POST', '/api/media/download', request);

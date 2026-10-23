@@ -74,11 +74,20 @@ pub struct DlmanCore {
     /// Active HLS/DASH download tasks (keyed by download UUID).
     /// Used for pause/cancel — abort_handle kills all in-flight segment requests.
     hls_tasks: Arc<RwLock<HashMap<Uuid, HlsTaskHandle>>>,
+    pub youtube: Arc<media::youtube::YoutubeService>,
+    youtube_data_dir: PathBuf,
 }
 
 impl DlmanCore {
     /// Create a new DlmanCore instance
     pub async fn new(data_dir: PathBuf) -> Result<Self, DlmanError> {
+        Self::new_with_media_tools(data_dir, None).await
+    }
+
+    /// Configure optional desktop resources before scheduled jobs can start.
+    pub async fn new_with_media_tools(data_dir: PathBuf, media_tools: Option<PathBuf>) -> Result<Self, DlmanError> {
+        let youtube = Arc::new(media::youtube::YoutubeService::default());
+        if let Some(root) = media_tools { youtube.configure(root); }
         // Create event channel
         let (event_tx, _) = broadcast::channel(1000);
         
@@ -115,6 +124,8 @@ impl DlmanCore {
             settings: Arc::new(RwLock::new(settings)),
             event_tx,
             hls_tasks: Arc::new(RwLock::new(HashMap::new())),
+            youtube,
+            youtube_data_dir: data_dir.clone(),
         };
         
         // Start the scheduler background task
@@ -254,6 +265,9 @@ impl DlmanCore {
         cookies: Option<String>,
         auto_start: bool,
     ) -> Result<Download, DlmanError> {
+        if media::youtube::is_youtube_host(url) {
+            return Err(DlmanError::InvalidOperation("Inspect this YouTube video and select a format first.".into()));
+        }
         // Safety net: redirect streaming URLs to the HLS/DASH pipeline.
         if is_streaming_url(url) {
             info!("[add_download] Intercepted streaming URL → HLS pipeline");
@@ -349,6 +363,10 @@ impl DlmanCore {
     
     /// Pause a download (works for both regular and HLS/DASH downloads)
     pub async fn pause_download(&self, id: Uuid) -> Result<(), DlmanError> {
+        let download = self.get_download(id).await?;
+        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+            return self.stop_youtube(id, DownloadStatus::Paused).await;
+        }
         // Check if this is an active HLS streaming download
         if let Some(task) = self.hls_tasks.write().await.remove(&id) {
             // 1. Signal the cancel flag (cooperative)
@@ -386,6 +404,9 @@ impl DlmanCore {
     /// Resume a download
     pub async fn resume_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let download = self.get_download(id).await?;
+        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+            return self.start_youtube(id).await;
+        }
 
         // ── Streaming URL guard ─────────────────────────────────────────
         if is_streaming_url(&download.url) {
@@ -440,6 +461,10 @@ impl DlmanCore {
     
     /// Cancel a download (works for both regular and HLS/DASH downloads)
     pub async fn cancel_download(&self, id: Uuid) -> Result<(), DlmanError> {
+        let download = self.get_download(id).await?;
+        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+            return self.stop_youtube(id, DownloadStatus::Cancelled).await;
+        }
         // Check if there's an active HLS task — abort it forcefully
         if let Some(task) = self.hls_tasks.write().await.remove(&id) {
             task.cancel.store(true, Ordering::Release);
@@ -476,6 +501,9 @@ impl DlmanCore {
     /// This continues from existing progress when possible, rather than starting over
     pub async fn retry_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let mut download = self.get_download(id).await?;
+        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+            return self.start_youtube(id).await;
+        }
 
         // ── Streaming URL guard ─────────────────────────────────────────
         if is_streaming_url(&download.url) {
@@ -551,6 +579,20 @@ impl DlmanCore {
     
     /// Delete a download
     pub async fn delete_download(&self, id: Uuid, delete_file: bool) -> Result<(), DlmanError> {
+        let download = self.get_download(id).await?;
+        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+            self.stop_youtube(id, DownloadStatus::Cancelled).await?;
+            let download = self.get_download(id).await?;
+            // Keep incomplete media staging recoverable; removing a history row never
+            // silently discards its retained partial transfer.
+            self.download_manager.db().delete_download(id).await?;
+            if delete_file && download.status == DownloadStatus::Completed {
+                let path = download.destination.join(&download.filename);
+                if path.is_file() { tokio::fs::remove_file(path).await?; }
+            }
+            self.emit(CoreEvent::DownloadRemoved { id });
+            return Ok(());
+        }
         self.download_manager.delete(id, delete_file).await
     }
     
@@ -563,6 +605,16 @@ impl DlmanCore {
     ) -> Result<(), DlmanError> {
         // Get download to find its queue
         let download = self.get_download(id).await?;
+        if download.youtube.is_some() {
+            let active = download.status == DownloadStatus::Downloading;
+            if active { self.stop_youtube(id, DownloadStatus::Paused).await?; }
+            let mut download = self.get_download(id).await?;
+            download.speed_limit = speed_limit;
+            self.download_manager.db().upsert_download(&download).await?;
+            self.emit(CoreEvent::DownloadUpdated { download });
+            if active { self.start_youtube(id).await?; }
+            return Ok(());
+        }
         
         // Calculate effective limit for active downloads:
         // - If speed_limit is Some(value), use that value
@@ -609,6 +661,13 @@ impl DlmanCore {
     /// Update a queue
     pub async fn update_queue(&self, id: Uuid, options: QueueOptions) -> Result<Queue, DlmanError> {
         let queue = self.queue_manager.update_queue(id, options).await?;
+        for download in self.get_all_downloads().await? {
+            if download.queue_id == id && download.youtube.is_some() && download.speed_limit.is_none()
+                && download.status == DownloadStatus::Downloading {
+                self.stop_youtube(download.id, DownloadStatus::Paused).await?;
+                self.start_youtube(download.id).await?;
+            }
+        }
         self.storage.save_queue(&queue).await?;
         
         // Update speed limits for all active downloads in this queue that use queue limit
@@ -736,11 +795,18 @@ impl DlmanCore {
         // Update downloads
         for id in ids {
             let mut download = self.get_download(id).await?;
+            let restart_youtube = download.youtube.is_some() && download.status == DownloadStatus::Downloading;
+            if restart_youtube {
+                self.stop_youtube(id, DownloadStatus::Paused).await?;
+                download = self.get_download(id).await?;
+            }
             download.queue_id = queue_id;
             // Clear the download's speed limit override so it uses the new queue's limit
             download.speed_limit = None;
             self.download_manager.db().upsert_download(&download).await?;
             
+            // YouTube's rate is a process argument; restart against the same stage.
+            if restart_youtube { self.start_youtube(id).await?; }
             // Update speed limit if download is active
             if self.download_manager.is_active(id).await {
                 self.download_manager.update_speed_limit_with_effective(
@@ -756,7 +822,10 @@ impl DlmanCore {
     
     /// Pause all downloads
     pub async fn pause_all_downloads(&self) -> Result<(), DlmanError> {
-        self.download_manager.pause_all().await
+        for download in self.get_all_downloads().await? {
+            if download.status == DownloadStatus::Downloading { self.pause_download(download.id).await?; }
+        }
+        Ok(())
     }
     
     // ========================================================================

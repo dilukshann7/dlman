@@ -175,6 +175,12 @@ impl DownloadDatabase {
         .await
         .ok();
         
+        // Add provider metadata without changing existing download records.
+        let columns = sqlx::query("PRAGMA table_info(downloads)").fetch_all(pool).await?;
+        if !columns.iter().any(|row| row.get::<String, _>("name") == "youtube") {
+            sqlx::query("ALTER TABLE downloads ADD COLUMN youtube TEXT").execute(pool).await?;
+        }
+
         // Migration: Add cookies column to downloads table if it doesn't exist
         sqlx::query(
             r#"
@@ -199,8 +205,8 @@ impl DownloadDatabase {
                 id, url, final_url, filename, destination, size, downloaded,
                 status, queue_id, category_id, color, error, speed_limit,
                 created_at, completed_at, retry_count, etag, last_modified, supports_range,
-                cookies
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cookies, youtube
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 final_url = excluded.final_url,
@@ -219,7 +225,8 @@ impl DownloadDatabase {
                 etag = excluded.etag,
                 last_modified = excluded.last_modified,
                 supports_range = excluded.supports_range,
-                cookies = excluded.cookies
+                cookies = excluded.cookies,
+                youtube = excluded.youtube
             "#,
         )
         .bind(download.id.to_string())
@@ -242,6 +249,7 @@ impl DownloadDatabase {
         .bind(None::<String>) // last_modified - will add later
         .bind(0i64) // supports_range - will add later
         .bind(download.cookies.as_ref())
+        .bind(download.youtube.as_ref().map(|value| value.to_string()))
         .execute(&mut *tx)
         .await?;
         
@@ -747,6 +755,7 @@ fn row_to_download(row: sqlx::sqlite::SqliteRow, segments: Vec<Segment>) -> Resu
             .map(|dt| dt.with_timezone(&Utc)),
         retry_count: row.get::<i64, _>("retry_count") as u32,
         cookies: row.get("cookies"),
+        youtube: row.get::<Option<String>, _>("youtube").map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))),
     })
 }
 

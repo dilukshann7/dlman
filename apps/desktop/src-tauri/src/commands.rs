@@ -226,6 +226,35 @@ pub async fn cancel_download(state: State<'_, AppState>, id: String) -> Result<(
         .await
 }
 
+/// Start a bounded inspection without holding a browser or Tauri request open.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn inspect_youtube(state: State<'_, AppState>, url: String) -> Result<dlman_types::YoutubeInspection, String> {
+    state.with_core_async(|core| async move {
+        let proxy = core.get_settings().await.proxy;
+        core.youtube.inspect(&url, proxy).await
+    }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_youtube_inspection(state: State<'_, AppState>, id: String) -> Result<dlman_types::YoutubeInspection, String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid inspection ID")?;
+    state.with_core_async(|core| async move { core.youtube.inspection(id).await }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn start_youtube_download(state: State<'_, AppState>, url: String, inspection_id: String,
+    selection: dlman_types::YoutubeSelection, destination: String, queue_id: String,
+    category_id: Option<String>, filename: Option<String>, start_later: Option<bool>,
+) -> Result<Download, String> {
+    let inspection_id = Uuid::parse_str(&inspection_id).map_err(|_| "Invalid inspection ID")?;
+    let queue_id = Uuid::parse_str(&queue_id).map_err(|_| "Invalid queue ID")?;
+    let category_id = category_id.map(|id| Uuid::parse_str(&id)).transpose().map_err(|_| "Invalid category ID")?;
+    state.with_core_async(|core| async move {
+        core.add_youtube_download(&url, inspection_id, selection, PathBuf::from(destination), queue_id,
+            category_id, filename, !start_later.unwrap_or(false)).await
+    }).await
+}
+
 /// Start an HLS/DASH media download (called after user approves in dialog).
 /// This is the second half of the unified pipeline:
 /// 1. Extension sends media → server shows dialog (handle_media_download)
@@ -313,6 +342,9 @@ pub async fn update_download(
             
             // Update destination
             if let Some(destination) = updates.destination {
+                if download.youtube.is_some() && download.status == dlman_types::DownloadStatus::Downloading {
+                    return Err(dlman_core::DlmanError::InvalidOperation("Pause this YouTube download before changing its destination.".into()));
+                }
                 download.destination = PathBuf::from(destination);
                 needs_db_update = true;
             }
@@ -859,7 +891,7 @@ pub async fn clear_all_downloads(state: State<'_, AppState>) -> Result<(), Strin
             // Get all downloads and delete them
             let downloads = core.get_all_downloads().await?;
             for download in downloads {
-                core.download_manager.db().delete_download(download.id).await?;
+                core.delete_download(download.id, false).await?;
             }
             Ok(())
         })

@@ -157,6 +157,8 @@ impl BrowserServer {
             .route("/api/downloads/:id/cancel", post(handle_cancel_download))
             // Media download — handles video streams from extension
             .route("/api/media/download", post(handle_media_download))
+            .route("/api/media/inspect", post(handle_youtube_inspect))
+            .route("/api/media/inspect/:id", get(handle_youtube_inspection))
             // WebSocket for real-time events (optional)
             .route("/ws", get(handle_websocket))
             .layer(cors)
@@ -420,12 +422,39 @@ async fn handle_cancel_download(
 /// UNIFIED PIPELINE: ALL protocols (Direct, HLS, DASH) go through the
 /// download dialog first. The user must approve before any download starts.
 /// This matches the standard download flow and enables pause/cancel.
+async fn handle_youtube_inspect(
+    State(state): axum::extract::State<SharedState>,
+    axum::Json(request): axum::Json<dlman_types::YoutubeInspectRequest>,
+) -> Result<axum::Json<dlman_types::YoutubeInspection>, (axum::http::StatusCode, String)> {
+    let core = state.read().await.core.clone();
+    let proxy = core.get_settings().await.proxy;
+    core.youtube.inspect(&request.url, proxy).await.map(axum::Json)
+        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))
+}
+
+async fn handle_youtube_inspection(
+    State(state): axum::extract::State<SharedState>, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> Result<axum::Json<dlman_types::YoutubeInspection>, (axum::http::StatusCode, String)> {
+    let core = state.read().await.core.clone();
+    core.youtube.inspection(id).await.map(axum::Json)
+        .map_err(|error| (axum::http::StatusCode::NOT_FOUND, error.to_string()))
+}
+
 async fn handle_media_download(
     State(state): axum::extract::State<SharedState>,
     axum::Json(req): axum::Json<MediaDownloadRequest>,
 ) -> impl axum::response::IntoResponse {
     let state = state.read().await;
     let app_handle = &state.app_handle;
+    if req.media.protocol == MediaProtocol::Youtube {
+        let validation = match (&req.youtube_selection, req.inspection_id) {
+            (Some(selection), Some(id)) => state.core.youtube.validate_preview(id, &req.media.master_url, selection).await.map(|_| ()),
+            _ => Err(dlman_core::DlmanError::InvalidOperation("Select a YouTube quality before downloading.".into())),
+        };
+        if let Err(error) = validation {
+            return axum::Json(MediaDownloadResponse { success: false, download_id: None, error: Some(error.to_string()) });
+        }
+    }
 
     // For ALL protocols, show the download dialog first.
     // The dialog will call /api/media/start when the user confirms.
@@ -442,7 +471,7 @@ async fn handle_media_download(
                 req.media.master_url.clone()
             }
         }
-        MediaProtocol::Hls | MediaProtocol::Dash => {
+        MediaProtocol::Hls | MediaProtocol::Dash | MediaProtocol::Youtube => {
             // For streaming protocols, use the master URL
             req.media.master_url.clone()
         }
@@ -482,7 +511,9 @@ async fn handle_media_download(
         "url": download_url,
         "referrer": req.media.referrer,
         "filename": filename,
-        "cookies": req.media.cookies,
+        "cookies": if req.media.protocol == MediaProtocol::Youtube { None } else { req.media.cookies },
+        "youtube_selection": req.youtube_selection,
+        "inspection_id": req.inspection_id,
         // Pass media metadata for HLS/DASH so the start command has full context
         "media_protocol": format!("{:?}", req.media.protocol).to_lowercase(),
         "media_master_url": req.media.master_url,

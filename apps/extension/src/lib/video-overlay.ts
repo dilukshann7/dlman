@@ -94,7 +94,7 @@ function fmtBitrate(bps: number): string {
 // VideoOverlayManager
 // ============================================================================
 
-export type OnDownloadRequest = (request: MediaDownloadRequest) => void;
+export type OnDownloadRequest = (request: MediaDownloadRequest) => void | Promise<void>;
 
 interface Overlay {
   media: DetectedMedia;
@@ -113,7 +113,7 @@ export class VideoOverlayManager {
   private scrollHandler: (() => void) | null = null;
   private resizeHandler: (() => void) | null = null;
 
-  constructor(onDownload: OnDownloadRequest) {
+  constructor(onDownload: OnDownloadRequest, private resolveMedia?: (media: DetectedMedia) => Promise<DetectedMedia>) {
     this.onDownload = onDownload;
     this.scrollHandler = () => this.repositionAll();
     this.resizeHandler = () => this.repositionAll();
@@ -123,7 +123,7 @@ export class VideoOverlayManager {
 
   // ---------- Public API ----------
 
-  addOverlay(media: DetectedMedia, variants?: MediaVariant[]): void {
+  addOverlay(media: DetectedMedia, variants?: MediaVariant[], targetVideo?: HTMLVideoElement): void {
     if (dismissed.has(media.id)) return;
     if (this.overlays.has(media.id)) {
       const o = this.overlays.get(media.id)!;
@@ -131,7 +131,7 @@ export class VideoOverlayManager {
       return;
     }
 
-    const video = this.findVideo(media);
+    const video = targetVideo || this.findVideo(media);
     if (!video) return;
 
     const hasMulti = variants && variants.length > 1;
@@ -168,14 +168,26 @@ export class VideoOverlayManager {
     }
 
     // Main click: single → download immediately, multi → toggle quality picker
-    pill.addEventListener('click', (e) => {
+    pill.addEventListener('click', async (e) => {
       e.stopPropagation();
       e.preventDefault();
-      if (hasMulti) {
-        this.toggleDropdown(media.id, pill, variants!);
-      } else {
-        this.doDownload(media, variants, 0);
-      }
+      const current = this.overlays.get(media.id);
+      if (!current || pill.dataset.loading) return;
+      if (current.dropdown) { this.closeDropdown(current); return; }
+      try {
+        if (current.media.protocol === 'youtube' && this.resolveMedia) {
+          pill.dataset.loading = 'true'; label.textContent = 'Loading…';
+          const resolved = await this.resolveMedia(current.media);
+          if (this.overlays.get(media.id) !== current || !current.video?.isConnected) return;
+          current.media = resolved;
+        }
+        label.textContent = 'Download Video'; pill.title = '';
+        if (current.media.variants.length > 1) this.toggleDropdown(media.id, pill, current.media.variants);
+        else if (current.media.variants.length === 1 || current.media.protocol !== 'youtube') await this.doDownload(current.media, current.media.variants, 0);
+      } catch (error) {
+        label.textContent = 'Retry';
+        pill.title = error instanceof Error ? error.message : 'Video inspection failed.';
+      } finally { delete pill.dataset.loading; }
     });
 
     // Close X (visible on hover)
@@ -269,7 +281,8 @@ export class VideoOverlayManager {
     dd.appendChild(hdr);
 
     // "Download All" option — downloads every variant at once
-    if (variants.length > 1) {
+    const videoVariants = variants.filter((variant) => !variant.audio_only);
+    if ((o.media.protocol === "youtube" ? videoVariants.length : variants.length) > 1) {
       const allItem = document.createElement('div');
       allItem.className = 'dd-item dd-item-all';
       const allLbl = document.createElement('span');
@@ -277,14 +290,19 @@ export class VideoOverlayManager {
       allLbl.textContent = '⬇ Download All';
       const allMeta = document.createElement('span');
       allMeta.className = 'dd-meta';
-      allMeta.textContent = `${variants.length} qualities`;
+      allMeta.textContent = `${o.media.protocol === "youtube" ? videoVariants.length : variants.length} qualities`;
       allItem.appendChild(allLbl);
       allItem.appendChild(allMeta);
-      allItem.addEventListener('click', (e) => {
+      allItem.addEventListener('click', async (e) => {
         e.stopPropagation();
         e.preventDefault();
-        this.doDownloadAll(o.media, variants);
-        this.closeDropdown(o);
+        try {
+          await this.doDownloadAll(o.media, variants);
+          this.closeDropdown(o);
+        } catch (error) {
+          o.pill.title = error instanceof Error ? error.message : 'Download was not accepted.';
+          allLbl.textContent = 'Retry';
+        }
       });
       dd.appendChild(allItem);
 
@@ -312,11 +330,16 @@ export class VideoOverlayManager {
 
       item.appendChild(lbl);
       if (parts.length) item.appendChild(meta);
-      item.addEventListener('click', (e) => {
+      item.addEventListener('click', async (e) => {
         e.stopPropagation();
         e.preventDefault();
-        this.doDownload(o.media, variants, i);
-        this.closeDropdown(o);
+        try {
+          await this.doDownload(o.media, variants, i);
+          this.closeDropdown(o);
+        } catch (error) {
+          o.pill.title = error instanceof Error ? error.message : 'Download was not accepted.';
+          lbl.textContent = 'Retry';
+        }
       });
       dd.appendChild(item);
     });
@@ -351,17 +374,17 @@ export class VideoOverlayManager {
 
   // ---------- Download ----------
 
-  private doDownload(media: DetectedMedia, variants?: MediaVariant[], idx?: number): void {
-    this.onDownload({ media: variants ? { ...media, variants } : media, variant_index: idx });
+  private async doDownload(media: DetectedMedia, variants?: MediaVariant[], idx?: number): Promise<void> {
+    const selected = variants?.[idx ?? 0];
+    await this.onDownload({ media: variants ? { ...media, variants } : media, variant_index: idx,
+      inspection_id: media.inspection_id, youtube_selection: selected?.youtube_selection });
   }
 
   /** Download every variant — fires a separate request for each quality */
-  private doDownloadAll(media: DetectedMedia, variants: MediaVariant[]): void {
+  private async doDownloadAll(media: DetectedMedia, variants: MediaVariant[]): Promise<void> {
     for (let i = 0; i < variants.length; i++) {
-      this.onDownload({
-        media: { ...media, variants },
-        variant_index: i,
-      });
+      if (media.protocol === 'youtube' && variants[i].audio_only) continue;
+      await this.doDownload(media, variants, i);
     }
   }
 

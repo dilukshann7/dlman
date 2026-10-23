@@ -53,6 +53,16 @@ Get the latest extension from [GitHub Releases](https://github.com/novincode/dlm
 
 ---
 
+## YouTube
+
+Use the existing video button to select a video quality or **Audio only · MP3**.
+The desktop app opens its normal destination dialog. Download All presents each
+video quality for approval without including MP3. You can also paste a YouTube
+link directly into the desktop Add Download dialog. Requires the matching desktop
+version with bundled media tools. Single public videos and Shorts only; playlists,
+live streams, DRM, and account-required videos are unsupported. See
+[YouTube support](../../docs/youtube-support.md) for packaging and verification.
+
 ## 🔗 How It Works
 
 The extension connects to the DLMan desktop app running on your computer.

@@ -62,3 +62,10 @@ coverage
 apps/extension/.wxt
 apps/extension/dist
 apps/extension/*.zip
+
+# Prepared, verified platform media executables
+apps/desktop/src-tauri/resources/media-tools/*
+!apps/desktop/src-tauri/resources/media-tools/README.md
+
+# Python fixture caches
+__pycache__/

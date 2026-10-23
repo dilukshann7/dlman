@@ -16,7 +16,7 @@ export default defineContentScript({
   main() {
     try {
       const script = document.createElement('script');
-      script.src = browser.runtime.getURL('/media-hook.js');
+      script.src = new URL('media-hook.js', browser.runtime.getURL('/')).href;
       script.onload = () => script.remove();
       (document.head || document.documentElement).appendChild(script);
     } catch {
