@@ -11,6 +11,7 @@ import { useQueueStore } from "@/stores/queues";
 import { useUIStore } from "@/stores/ui";
 import { useCredentialsStore } from "@/stores/credentials";
 import { CoreEvent } from "@/types";
+import { showMainWindow } from "./system-tray";
 import {
   notifyDownloadComplete,
   notifyDownloadFailed,
@@ -345,6 +346,8 @@ export function setupEventListeners(): () => void {
       
       // Open (or re-fill, if already open) the new download dialog.
       useUIStore.getState().routeUrlIntake(1);
+      // Also activate queued YouTube dialogs when each one is actually presented.
+      void showMainWindow();
   };
   const youtubeDialogs = createYoutubeDialogQueue<DownloadDialogPayload>(presentDownloadDialog,
     () => useUIStore.getState().showNewDownloadDialog);
@@ -369,6 +372,7 @@ export function setupEventListeners(): () => void {
       if (urls && urls.length > 0) {
         setPendingDropUrls(urls);
         useUIStore.getState().routeUrlIntake(urls.length);
+        void showMainWindow();
       }
     }
   ));

@@ -195,12 +195,15 @@ impl BrowserServer {
 
 type SharedState = Arc<RwLock<ServerState>>;
 
-/// Helper: bring the app window to attention (dock bounce on macOS, taskbar flash on Windows)
+/// Helper: activate the app window for browser download dialogs.
 fn request_attention(app_handle: &AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
         // Show the window if hidden
         let _ = window.show();
         let _ = window.unminimize();
+        if let Err(error) = window.set_focus() {
+            tracing::warn!("Failed to focus download dialog window: {}", error);
+        }
         // Request user attention (bounces dock icon on macOS, flashes taskbar on Windows)
         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
@@ -243,7 +246,7 @@ async fn handle_show_dialog(
         });
     }
 
-    // Bounce dock / flash taskbar
+    // Activate the download dialog and request attention.
     request_attention(app_handle);
 
     axum::Json(ShowDialogResponse {
@@ -292,7 +295,7 @@ async fn handle_show_batch_dialog(
         }
     }
 
-    // Bounce dock / flash taskbar
+    // Activate the download dialog and request attention.
     request_attention(app_handle);
 
     axum::Json(ShowDialogResponse {
