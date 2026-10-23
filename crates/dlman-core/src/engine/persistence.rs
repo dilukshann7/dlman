@@ -405,6 +405,22 @@ impl DownloadDatabase {
         Ok(())
     }
     
+    /// Persist media progress and a discovered combined size without replacing job settings.
+    pub async fn update_media_progress(
+        &self,
+        download_id: Uuid,
+        downloaded: u64,
+        total: Option<u64>,
+    ) -> Result<(), DlmanError> {
+        sqlx::query("UPDATE downloads SET downloaded = ?, size = COALESCE(?, size) WHERE id = ?")
+            .bind(downloaded as i64)
+            .bind(total.map(|bytes| bytes as i64))
+            .bind(download_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Update download status
     pub async fn update_download_status(
         &self,

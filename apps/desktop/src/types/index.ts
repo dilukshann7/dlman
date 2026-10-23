@@ -18,6 +18,8 @@ export interface Download {
   created_at: string;
   completed_at: string | null;
   retry_count?: number;
+  /** Provider job metadata, present for YouTube transfers. */
+  youtube?: unknown;
 }
 
 export type DownloadStatus =

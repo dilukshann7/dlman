@@ -45,6 +45,63 @@ fn pairs_compatible_audio_and_adds_explicit_mp3_conversion() {
 }
 
 #[test]
+fn video_size_estimates_both_streams_when_byte_sizes_are_missing() {
+    let mut data = fixture();
+    data["duration"] = json!(60);
+    data["formats"][0]["filesize"] = json!(null);
+    data["formats"][0]["tbr"] = json!(800);
+    data["formats"][1]["filesize"] = json!(null);
+    let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+    // 60 seconds of 800 kbps video plus 128 kbps audio, in bytes.
+    assert_eq!(preview.variants[0].size, Some(6_960_000));
+    assert_eq!(preview.variants[1].size, None);
+}
+
+#[test]
+fn video_size_prefers_reported_bytes_and_accepts_fractional_estimates() {
+    let mut data = fixture();
+    data["duration"] = json!(60);
+    data["formats"][0]["filesize"] = json!(0);
+    data["formats"][0]["filesize_approx"] = json!(1000.5);
+    data["formats"][0]["tbr"] = json!(800);
+    let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+    assert_eq!(preview.variants[0].size, Some(1101));
+    data["formats"][0]["filesize"] = json!(2000);
+    let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+    assert_eq!(preview.variants[0].size, Some(2100));
+}
+
+#[test]
+fn video_size_stays_unknown_without_a_valid_duration_or_rate() {
+    for duration in [json!(null), json!(0), json!(-1)] {
+        let mut data = fixture();
+        data["duration"] = duration;
+        data["formats"][0]["filesize"] = json!(null);
+        data["formats"][0]["tbr"] = json!(800);
+        let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+        assert_eq!(preview.variants[0].size, None);
+    }
+    for rate in [json!(null), json!(0), json!(-1), json!("800"), json!(1e308)] {
+        let mut data = fixture();
+        data["duration"] = json!(60);
+        data["formats"][0]["filesize"] = json!(null);
+        data["formats"][0]["tbr"] = rate;
+        let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+        assert_eq!(preview.variants[0].size, None);
+    }
+}
+
+#[test]
+fn video_size_uses_the_muxed_bitrate_without_counting_audio_twice() {
+    let data = json!({"id":"abcdefghijk", "title":"Example", "duration":60, "formats":[
+        {"format_id":"18", "ext":"mp4", "width":640, "height":360,
+         "vcodec":"avc1", "acodec":"mp4a", "tbr":928, "abr":128}
+    ]});
+    let preview = parse_preview("https://youtu.be/abcdefghijk", &data).unwrap();
+    assert_eq!(preview.variants[0].size, Some(6_960_000));
+}
+
+#[test]
 fn rejects_live_drm_auth_playlist_and_changed_identity() {
     for (key, value) in [
         ("is_live", json!(true)),

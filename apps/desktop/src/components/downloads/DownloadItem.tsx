@@ -107,6 +107,9 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
   const progress = download.size
     ? (download.downloaded / download.size) * 100
     : 0;
+  const totalSizeLabel = download.size
+    ? `${download.youtube && download.status !== "completed" ? "~" : ""}${formatBytes(download.size)}`
+    : t('downloadItem.unknown');
 
   // Get effective speed limit for display
   const effectiveSpeedLimit = download.speed_limit || null;
@@ -630,8 +633,7 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
                 <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
                   {/* Size */}
                   <span>
-                    {formatBytes(download.downloaded)}
-                    {download.size && ` / ${formatBytes(download.size)}`}
+                    {formatBytes(download.downloaded)} / {totalSizeLabel}
                   </span>
 
                   {/* Speed (for active downloads) */}

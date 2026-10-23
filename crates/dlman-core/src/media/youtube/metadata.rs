@@ -29,10 +29,36 @@ fn has_video(f: &Value) -> bool {
 fn has_audio(f: &Value) -> bool {
     f["acodec"].as_str().is_some_and(|codec| codec != "none")
 }
-fn size(f: &Value) -> Option<u64> {
-    f["filesize"]
-        .as_u64()
-        .or_else(|| f["filesize_approx"].as_u64())
+fn positive_number(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|n| n.is_finite() && *n > 0.0)
+}
+
+pub(super) fn positive_bytes(value: &Value) -> Option<u64> {
+    if let Some(bytes) = value.as_u64() {
+        return (bytes > 0 && bytes <= i64::MAX as u64).then_some(bytes);
+    }
+    positive_number(value)
+        .filter(|bytes| bytes.ceil() < i64::MAX as f64)
+        .map(|bytes| bytes.ceil() as u64)
+}
+
+fn size(f: &Value, duration: Option<f64>) -> Option<u64> {
+    positive_bytes(&f["filesize"])
+        .or_else(|| positive_bytes(&f["filesize_approx"]))
+        .or_else(|| {
+            let duration = positive_number(&f["duration"]).or(duration)?;
+            let rate =
+                positive_number(&f["tbr"]).or_else(|| match (has_video(f), has_audio(f)) {
+                    (true, true) => Some(positive_number(&f["vbr"])? + positive_number(&f["abr"])?),
+                    (true, false) => positive_number(&f["vbr"]),
+                    (false, true) => positive_number(&f["abr"]),
+                    _ => None,
+                })?;
+            // yt-dlp bitrates are decimal kilobits per second; this is an estimate.
+            let bytes = duration * rate * 1000.0 / 8.0;
+            (bytes.is_finite() && bytes > 0.0 && bytes.ceil() < i64::MAX as f64)
+                .then(|| bytes.ceil() as u64)
+        })
 }
 
 const MAX_MEDIA_VARIANTS: usize = 128;
@@ -163,6 +189,7 @@ pub fn parse_preview(url: &str, value: &Value) -> Result<YoutubePreview, DlmanEr
     }
     let identity = format!("Youtube:{media_id}");
     let title = clean(value["title"].as_str().unwrap_or("Video"), 160);
+    let duration = positive_number(&value["duration"]);
     let formats = value["formats"]
         .as_array()
         .ok_or_else(|| media_error("No video formats are available."))?;
@@ -215,7 +242,7 @@ pub fn parse_preview(url: &str, value: &Value) -> Result<YoutubePreview, DlmanEr
                 video_id,
                 extension.to_owned(),
                 clean(f["acodec"].as_str().unwrap_or("unknown"), 32),
-                size(f),
+                size(f, duration),
             )
         } else if let Some(track) = best_audio {
             let audio_id = id(&track["format_id"]).expect("filtered");
@@ -228,7 +255,10 @@ pub fn parse_preview(url: &str, value: &Value) -> Result<YoutubePreview, DlmanEr
                 format!("{video_id}+{audio_id}"),
                 container.into(),
                 clean(track["acodec"].as_str().unwrap_or("audio"), 32),
-                size(f).zip(size(track)).map(|(a, b)| a.saturating_add(b)),
+                size(f, duration)
+                    .zip(size(track, duration))
+                    .and_then(|(a, b)| a.checked_add(b))
+                    .filter(|bytes| *bytes <= i64::MAX as u64),
             )
         } else {
             continue;

@@ -57,6 +57,26 @@ pub(super) async fn run(
     if cancel.is_cancelled() {
         return Err(DlmanError::Cancelled);
     }
+    // Inspection can discover a size that was unavailable when the job was queued.
+    let refreshed_size = preview
+        .variants
+        .iter()
+        .find(|variant| {
+            variant.id == job.selection.format_id
+                && variant.output_mode == job.selection.output_mode
+        })
+        .and_then(|variant| variant.size)
+        .filter(|size| *size > 0);
+    if refreshed_size.is_some() && refreshed_size != download.size {
+        download.size = refreshed_size;
+        core.download_manager
+            .db()
+            .update_media_progress(download.id, download.downloaded, download.size)
+            .await?;
+        core.emit(CoreEvent::DownloadUpdated {
+            download: download.clone(),
+        });
+    }
     tokio::fs::create_dir_all(&job.stage_dir).await?;
     let info = tokio::fs::symlink_metadata(&job.stage_dir).await?;
     if !info.is_dir() || info.file_type().is_symlink() {
@@ -206,6 +226,128 @@ pub(super) fn download_args(
     args
 }
 
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    use serde_json::json;
+
+    async fn observed_progress(
+        format_id: &str,
+        initial_size: Option<u64>,
+        records: &[Value],
+    ) -> (Vec<(u64, Option<u64>)>, Download) {
+        let root = std::env::temp_dir().join(format!("dlman-video-size-{}", uuid::Uuid::new_v4()));
+        let core = DlmanCore::new(root.clone()).await.unwrap();
+        let mut download = Download::new(
+            "https://www.youtube.com/watch?v=abcdefghijk".into(),
+            root.join("downloads"),
+            uuid::Uuid::nil(),
+        );
+        download.size = initial_size;
+        download.youtube = Some(json!({
+            "selection": { "identity": "Youtube:abcdefghijk", "format_id": format_id,
+                "container": "mp4", "quality": "1080p", "output_mode": "video" },
+            "stage_dir": root.join("staging")
+        }));
+        core.download_manager
+            .db()
+            .upsert_download(&download)
+            .await
+            .unwrap();
+        let mut events = core.subscribe();
+        let input = records
+            .iter()
+            .map(|value| format!("DLMAN_PROGRESS:{value}\n"))
+            .collect::<String>();
+        progress(input.as_bytes(), &core, &download).await.unwrap();
+        let mut observed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let CoreEvent::DownloadProgress {
+                downloaded, total, ..
+            } = event
+            {
+                observed.push((downloaded, total));
+            }
+        }
+        let stored = core.get_download(download.id).await.unwrap();
+        core.youtube.shutdown().await;
+        core.scheduler.stop().await;
+        (observed, stored)
+    }
+
+    #[tokio::test]
+    async fn video_size_uses_runtime_estimates_then_exact_totals_and_persists_them() {
+        let (observed, stored) = observed_progress("18", None, &[
+            json!({"filename":"media.mp4", "downloaded_bytes":100, "total_bytes_estimate":1000.5}),
+            json!({"filename":"media.mp4", "downloaded_bytes":200}),
+            json!({"filename":"media.mp4", "downloaded_bytes":1200, "total_bytes":1200, "status":"finished"}),
+        ]).await;
+        assert_eq!(
+            observed,
+            vec![(100, Some(1001)), (200, Some(1001)), (1199, Some(1200))]
+        );
+        assert_eq!(stored.size, Some(1200));
+        assert_eq!(stored.downloaded, 1199);
+    }
+
+    #[tokio::test]
+    async fn video_size_never_treats_one_stream_as_the_whole_video() {
+        let (observed, stored) = observed_progress("137+140", None, &[
+            json!({"filename":"media.f137.mp4", "downloaded_bytes":1000, "total_bytes":1000, "status":"finished"}),
+            json!({"filename":"media.f140.m4a", "downloaded_bytes":50, "total_bytes_estimate":100}),
+            json!({"filename":"media.f140.m4a", "downloaded_bytes":100, "total_bytes":100, "status":"finished"}),
+        ]).await;
+        assert_eq!(
+            observed,
+            vec![(1000, None), (1050, Some(1100)), (1099, Some(1100))]
+        );
+        assert_eq!(stored.size, Some(1100));
+    }
+
+    #[tokio::test]
+    async fn video_size_keeps_the_combined_preview_until_all_stream_totals_arrive() {
+        let (observed, _) = observed_progress(
+            "137+140",
+            Some(1300),
+            &[
+                json!({"filename":"media.f137.mp4", "downloaded_bytes":500, "total_bytes":1000}),
+                json!({"filename":"media.f137.mp4", "downloaded_bytes":1000, "total_bytes":1000}),
+                json!({"filename":"media.f140.m4a", "downloaded_bytes":50, "total_bytes":100}),
+            ],
+        )
+        .await;
+        assert_eq!(
+            observed,
+            vec![(500, Some(1300)), (1000, Some(1300)), (1050, Some(1100))]
+        );
+    }
+
+    #[tokio::test]
+    async fn video_size_counts_reused_components_without_downloaded_bytes() {
+        let (observed, stored) = observed_progress(
+            "137+140",
+            None,
+            &[
+                json!({"filename":"media.f137.mp4", "total_bytes":1000, "status":"finished"}),
+                json!({"filename":"media.f140.m4a", "total_bytes":100, "status":"finished"}),
+            ],
+        )
+        .await;
+        assert_eq!(observed, vec![(1000, None), (1099, Some(1100))]);
+        assert_eq!(stored.size, Some(1100));
+    }
+
+    #[tokio::test]
+    async fn video_size_rejects_invalid_runtime_totals() {
+        let (observed, stored) = observed_progress("18", None, &[
+            json!({"filename":"media.mp4", "downloaded_bytes":100, "total_bytes":0}),
+            json!({"filename":"media.mp4", "downloaded_bytes":200, "total_bytes":-1, "total_bytes_estimate":1e308}),
+        ]).await;
+        assert_eq!(observed, vec![(100, None), (200, None)]);
+        assert_eq!(stored.size, None);
+    }
+}
+
 async fn progress(
     source: impl tokio::io::AsyncRead + Unpin,
     core: &DlmanCore,
@@ -214,7 +356,17 @@ async fn progress(
     // Bound each line, not total output: a long download must not exhaust a lifetime quota.
     let mut source = BufReader::new(source);
     let mut line = Vec::new();
-    let mut components = std::collections::HashMap::<String, u64>::new();
+    let mut components = std::collections::HashMap::<String, (u64, Option<u64>)>::new();
+    let job = download
+        .youtube
+        .clone()
+        .and_then(|value| serde_json::from_value::<YoutubeJob>(value).ok());
+    let expected_components = job
+        .as_ref()
+        .map_or(1, |job| job.selection.format_id.split('+').count());
+    let video_output = job.as_ref().map_or(true, |job| {
+        job.selection.output_mode == YoutubeOutput::Video
+    });
     loop {
         let buffer = source.fill_buf().await?;
         if buffer.is_empty() {
@@ -237,22 +389,41 @@ async fn progress(
         if let Some(record) = line.strip_prefix(b"DLMAN_PROGRESS:") {
             if let Ok(value) = serde_json::from_slice::<Value>(record) {
                 let key = value["filename"].as_str().unwrap_or("current").to_owned();
-                let received = value["downloaded_bytes"].as_u64().unwrap_or(0);
+                let reported_total = super::metadata::positive_bytes(&value["total_bytes"])
+                    .or_else(|| super::metadata::positive_bytes(&value["total_bytes_estimate"]));
+                let received = value["downloaded_bytes"]
+                    .as_u64()
+                    .or_else(|| {
+                        (value["status"] == "finished")
+                            .then_some(reported_total)
+                            .flatten()
+                    })
+                    .unwrap_or(0);
                 let previous = components.entry(key).or_default();
-                *previous = (*previous).max(received);
+                previous.0 = previous.0.max(received);
+                previous.1 = reported_total.or(previous.1);
                 let total_received = components
                     .values()
-                    .copied()
+                    .map(|(downloaded, _)| *downloaded)
                     .fold(0u64, u64::saturating_add)
                     .max(download.downloaded);
                 // The selected size includes both streams, but conversion/publish remain outstanding.
-                let total = download.size.filter(|size| *size > 0);
+                // A component total is not the full video size until every selected stream is known.
+                let runtime_total = if video_output && components.len() == expected_components {
+                    components
+                        .values()
+                        .try_fold(0u64, |sum, (_, total)| sum.checked_add((*total)?))
+                        .filter(|total| *total > 0 && *total <= i64::MAX as u64)
+                } else {
+                    None
+                };
+                let total = runtime_total.or(download.size.filter(|size| *size > 0));
                 let total_received = total
                     .map(|size| total_received.min(size.saturating_sub(1)))
                     .unwrap_or(total_received);
                 core.download_manager
                     .db()
-                    .update_download_progress(download.id, total_received)
+                    .update_media_progress(download.id, total_received, total)
                     .await?;
                 core.emit(CoreEvent::DownloadProgress {
                     id: download.id,

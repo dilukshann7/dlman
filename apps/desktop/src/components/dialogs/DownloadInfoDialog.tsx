@@ -205,6 +205,9 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
   if (!download) return null;
 
   const progress = download.size ? (download.downloaded / download.size) * 100 : 0;
+  const totalSizeLabel = download.size
+    ? `${download.youtube && download.status !== 'completed' ? '~' : ''}${formatBytes(download.size)}`
+    : t('downloadItem.unknown');
 
   const getStatusInfo = () => {
     switch (download.status) {
@@ -330,7 +333,7 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
               <div className="space-y-1.5">
                 <Progress value={progress} className="h-2" />
                 <div className="flex justify-between text-xs text-muted-foreground">
-                  <span>{formatBytes(download.downloaded)} / {download.size ? formatBytes(download.size) : t('downloadItem.unknown')}</span>
+                  <span>{formatBytes(download.downloaded)} / {totalSizeLabel}</span>
                   <span>{Math.round(progress)}%</span>
                 </div>
               </div>
@@ -390,7 +393,7 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
                 {t('downloadInfo.size')}
               </p>
               <p className="font-medium">
-                {download.size ? formatBytes(download.size) : t('downloadItem.unknown')}
+                {totalSizeLabel}
               </p>
             </div>
 
