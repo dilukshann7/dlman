@@ -1,15 +1,23 @@
 # DLMan Browser Extension
 
+<img src="public/icon/128.png" alt="DLMan" width="64" height="64">
+
 Modern browser extension for DLMan — capture downloads directly from your browser.
+
+This is the extension for [Dilukshan's DLMan fork](https://github.com/dilukshann7/dlman),
+based on the original project by [Novin Code](https://github.com/novincode/dlman).
+It uses the shared purple globe-and-arrow branding and adds public YouTube
+video/Shorts quality selection and MP3 handoff. See the root README for
+[original-author credit and rewrite details](../../README.md#thanks-to-the-original-creator).
 
 ## 📥 Download
 
-Get the latest extension from [GitHub Releases](https://github.com/novincode/dlman/releases/latest):
+Get the latest extension from [GitHub Releases](https://github.com/dilukshann7/dlman/releases/latest):
 
 | Browser | Download |
 |---------|----------|
-| ![Chrome](https://img.shields.io/badge/Chrome-4285F4?logo=googlechrome&logoColor=white) | [Download for Chrome](https://github.com/novincode/dlman/releases/latest) |
-| ![Firefox](https://img.shields.io/badge/Firefox-FF7139?logo=firefox&logoColor=white) | [Download for Firefox](https://github.com/novincode/dlman/releases/latest) |
+| ![Chrome](https://img.shields.io/badge/Chrome-4285F4?logo=googlechrome&logoColor=white) | [Download for Chrome](https://github.com/dilukshann7/dlman/releases/latest) |
+| ![Firefox](https://img.shields.io/badge/Firefox-FF7139?logo=firefox&logoColor=white) | [Download for Firefox](https://github.com/dilukshann7/dlman/releases/latest) |
 | ![Edge](https://img.shields.io/badge/Edge-0078D7?logo=microsoftedge&logoColor=white) | Use Chrome version |
 | ![Brave](https://img.shields.io/badge/Brave-FB542B?logo=brave&logoColor=white) | Use Chrome version |
 
@@ -126,7 +134,7 @@ pnpm --filter @dlman/extension build:firefox  # Firefox
 
 ```bash
 # Clone the repository
-git clone https://github.com/novincode/dlman.git
+git clone https://github.com/dilukshann7/dlman.git
 cd dlman
 
 # Install dependencies
