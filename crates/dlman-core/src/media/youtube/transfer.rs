@@ -1,7 +1,8 @@
 use super::{
     media_error, parse_preview,
     process::ProcessTree,
-    tools::{capped, capture},
+    tools::{capped, capture, process_failure},
+    verification::CookieFile,
 };
 use crate::{DlmanCore, DlmanError};
 use dlman_types::*;
@@ -13,18 +14,40 @@ use tokio_util::sync::CancellationToken;
 pub(super) async fn run(
     core: &DlmanCore,
     mut download: Download,
-    job: YoutubeJob,
+    mut job: YoutubeJob,
     cancel: CancellationToken,
 ) -> Result<(), DlmanError> {
     let tools = core.youtube.tools()?;
     let settings = core.get_settings().await;
+    let session = core
+        .youtube
+        .browser_session(&download.url, job.requires_browser_session)
+        .await?;
+    if session.is_some() && !job.requires_browser_session {
+        // A failed anonymous job can be retried after explicit verification of this video.
+        // Persist the requirement before using credentials so restart cannot silently downgrade it.
+        job.requires_browser_session = true;
+        download.youtube = Some(
+            serde_json::to_value(&job)
+                .map_err(|_| media_error("Cannot persist YouTube verification requirement."))?,
+        );
+        core.download_manager
+            .db()
+            .upsert_download(&download)
+            .await?;
+    }
     // A queued job outlives its preview. Re-extract and validate the exact stored selection.
     let inspection_slot = tokio::select! {
         _ = cancel.cancelled() => return Err(DlmanError::Cancelled),
         permit = core.youtube.slots.acquire() => permit.map_err(|_| media_error("Video inspection service stopped."))?,
     };
     let value = tools
-        .metadata(&download.url, &settings.proxy, cancel.clone())
+        .metadata(
+            &download.url,
+            &settings.proxy,
+            cancel.clone(),
+            session.as_deref(),
+        )
         .await?;
     let preview = parse_preview(&download.url, &value)?;
     drop(inspection_slot);
@@ -44,6 +67,10 @@ pub(super) async fn run(
         .speed_limit
         .or_else(|| queue.and_then(|q| q.speed_limit));
     let mut args = tools.args(&settings.proxy)?;
+    let cookies = session.as_deref().map(CookieFile::create).transpose()?;
+    if let Some(cookies) = &cookies {
+        args.extend(["--cookies".into(), cookies.path().display().to_string()]);
+    }
     args.extend(download_args(&job.selection, &job.stage_dir, limit));
     args.extend(["--".into(), download.url.clone()]);
     let mut process = ProcessTree::spawn(&tools.yt_dlp, &args)?;
@@ -58,13 +85,14 @@ pub(super) async fn run(
         .take()
         .ok_or_else(|| media_error("Cannot read media diagnostics."))?;
     let work = async {
-        let (_, _, status) = tokio::try_join!(
+        let (_, diagnostics, status) = tokio::try_join!(
             progress(stdout, core, &download),
             capped(stderr, 128 * 1024),
             async { process.child.wait().await.map_err(DlmanError::from) }
         )?;
         if !status.success() {
-            return Err(media_error(
+            return Err(process_failure(
+                &diagnostics,
                 "YouTube transfer failed. Partial files were retained; use Retry.",
             ));
         }
@@ -72,6 +100,7 @@ pub(super) async fn run(
     };
     let result = tokio::select! { _ = cancel.cancelled() => Err(DlmanError::Cancelled), result = work => result };
     process.stop().await?;
+    drop(cookies);
     result?;
     // Do not display completion when only the first audio/video component has finished.
     download = core.get_download(download.id).await?;

@@ -1180,6 +1180,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -1226,6 +1227,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "serde",
+ "serde_json",
  "url",
  "uuid",
 ]

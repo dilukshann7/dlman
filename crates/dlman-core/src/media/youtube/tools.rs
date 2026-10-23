@@ -1,3 +1,4 @@
+use super::verification::{BrowserSession, CookieFile};
 use super::{media_error, process::ProcessTree};
 use crate::DlmanError;
 use dlman_types::ProxySettings;
@@ -141,8 +142,13 @@ impl MediaTools {
         url: &str,
         proxy: &ProxySettings,
         cancel: CancellationToken,
+        session: Option<&BrowserSession>,
     ) -> Result<Value, DlmanError> {
         let mut args = self.args(proxy)?;
+        let cookies = session.map(CookieFile::create).transpose()?;
+        if let Some(cookies) = &cookies {
+            args.extend(["--cookies".into(), cookies.path().display().to_string()]);
+        }
         args.extend([
             "--dump-single-json".into(),
             "--skip-download".into(),
@@ -165,6 +171,18 @@ impl MediaTools {
 
 fn tool_error() -> DlmanError {
     media_error("Bundled YouTube tools are missing or failed verification. Reinstall a complete DLMan package.")
+}
+
+pub(super) fn process_failure(stderr: &[u8], fallback: &str) -> DlmanError {
+    // Classify bounded diagnostics without exposing proxy credentials, URLs or local paths.
+    let diagnostic = String::from_utf8_lossy(stderr).to_lowercase();
+    if diagnostic
+        .lines()
+        .any(|line| line.contains("sign in to confirm") && line.contains("not a bot"))
+    {
+        return media_error("YouTube blocked this request with a bot check. Public videos can also require verification. Use Verify in browser, complete the check, then share the session through the DLMan extension.");
+    }
+    media_error(fallback)
 }
 
 pub(super) async fn capped(
@@ -196,12 +214,12 @@ pub(super) async fn capture(
     let stdout = process.child.stdout.take().ok_or_else(tool_error)?;
     let stderr = process.child.stderr.take().ok_or_else(tool_error)?;
     let work = async {
-        let (out, _, status) =
+        let (out, diagnostics, status) =
             tokio::try_join!(capped(stdout, limit), capped(stderr, 128 * 1024), async {
                 process.child.wait().await.map_err(DlmanError::from)
             })?;
         if !status.success() {
-            return Err(media_error("This public video could not be processed. It may be unavailable or require an account."));
+            return Err(process_failure(&diagnostics, "This public video could not be processed. It may be unavailable or require an account."));
         }
         Ok(out)
     };
@@ -212,4 +230,72 @@ pub(super) async fn capture(
     // Reap descendants even when output bounds, cancellation or timeout ends collection.
     process.stop().await?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_bot_checks_without_exposing_raw_diagnostics() {
+        for diagnostic in [
+            "ERROR: [youtube] HLUamwXQ218: Sign in to confirm you're not a bot.",
+            "ERROR: [youtube] HLUamwXQ218: Sign in to confirm you’re not a bot.",
+        ] {
+            let stderr = format!(
+                "{diagnostic} Proxy: https://user:secret@example.com; cookies: C:\\private\\cookies.txt"
+            );
+            let error = process_failure(stderr.as_bytes(), "Inspection failed.").to_string();
+            assert!(error.contains("bot check"), "{error}");
+            assert!(error.contains("public"), "{error}");
+            assert!(!error.contains("secret"));
+            assert!(!error.contains("cookies.txt"));
+            assert!(!error.contains("Inspection failed."));
+        }
+    }
+
+    #[test]
+    fn unrelated_failures_keep_the_callers_fallback() {
+        for stderr in [
+            b"".as_slice(),
+            b"ERROR: Private video. Sign in if you have access.",
+            b"ERROR: Sign in to confirm your age.",
+            b"ERROR: network failure\xff",
+        ] {
+            let error = process_failure(stderr, "Transfer failed; partial files retained.");
+            assert!(error
+                .to_string()
+                .contains("Transfer failed; partial files retained."));
+            assert!(!error.to_string().contains("bot check"));
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture used by the media diagnostics test"]
+    fn bot_check_fixture() {
+        eprintln!("ERROR: [youtube] HLUamwXQ218: Sign in to confirm you're not a bot.");
+        std::process::exit(1);
+    }
+
+    #[tokio::test]
+    async fn capture_reports_the_bot_check_from_a_failed_child() {
+        let executable = std::env::current_exe().unwrap();
+        let args = vec![
+            "--exact".into(),
+            "media::youtube::tools::tests::bot_check_fixture".into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+        ];
+        let error = capture(
+            &executable,
+            &args,
+            CancellationToken::new(),
+            Duration::from_secs(10),
+            8192,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("bot check"), "{error}");
+        assert!(!error.to_string().contains("may be unavailable"));
+    }
 }

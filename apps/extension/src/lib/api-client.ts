@@ -360,6 +360,14 @@ export class DlmanClient {
     return this.httpRequest<import('../../../../shared/youtube.mjs').YoutubeInspection>('POST', '/api/media/inspect', { url });
   }
 
+  async submitYoutubeVerification(payload: { token: string; url: string; cookies: import('../../../../shared/youtube-verification.mjs').YoutubeSessionCookie[] }) {
+    return this.httpRequest<{ success: boolean }>('POST', '/api/media/verify', payload);
+  }
+
+  async cancelYoutubeVerification(token: string) {
+    return this.httpRequest<{ success: boolean }>('POST', `/api/media/verify/${encodeURIComponent(token)}/cancel`);
+  }
+
   async youtubeInspection(id: string) {
     return this.httpRequest<import('../../../../shared/youtube.mjs').YoutubeInspection>('GET', `/api/media/inspect/${encodeURIComponent(id)}`);
   }

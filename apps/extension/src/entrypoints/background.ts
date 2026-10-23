@@ -1,4 +1,5 @@
 import { canonicalYoutubeUrl, isYoutubeHost } from '../../../../shared/youtube.mjs';
+import { handleYoutubeVerificationMessage } from '@/lib/youtube-verification';
 import { defineBackground } from 'wxt/sandbox';
 import { getDlmanClient, resetDlmanClient } from '@/lib/api-client';
 import type { WsEvent } from '@/lib/api-client';
@@ -886,6 +887,15 @@ export default defineBackground(() => {
             sendResponse({ status: 'failed', error: error instanceof Error ? error.message : 'DLMan is unavailable.' });
           }
         })();
+        return true;
+
+      case 'youtube-verification-request':
+      case 'youtube-verification-details':
+      case 'youtube-verification-approve':
+      case 'youtube-verification-cancel':
+        void handleYoutubeVerificationMessage(msg, sender).then(sendResponse).catch(() => {
+          sendResponse({ success: false, error: 'Could not share the YouTube session. Keep the original video tab open, complete verification, and retry. If this request expired, start again in DLMan.' });
+        });
         return true;
 
       case 'media-detected':

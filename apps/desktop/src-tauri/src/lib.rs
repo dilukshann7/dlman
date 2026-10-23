@@ -120,6 +120,9 @@ pub fn run() {
             commands::probe_links,
             commands::start_media_download,
             commands::inspect_youtube,
+            commands::begin_youtube_verification,
+            commands::get_youtube_verification,
+            commands::cancel_youtube_verification,
             commands::get_youtube_inspection,
             commands::start_youtube_download,
             // Queue commands

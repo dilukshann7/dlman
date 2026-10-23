@@ -705,7 +705,16 @@ export function NewDownloadDialog() {
             <div className="space-y-2">
               <Label className="text-xs font-medium text-muted-foreground">{t('youtube.quality', 'Quality')}</Label>
               {youtube.loading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{t('youtube.loading', 'Loading video formats…')}</div>
-                : youtube.error ? <div className="space-y-2"><p className="text-sm text-destructive" role="alert">{youtube.error}</p><Button size="sm" variant="outline" onClick={youtube.retry}>{t('youtube.retry', 'Retry')}</Button></div>
+                : youtube.error ? <div className="space-y-2">
+                    <p className="text-sm text-destructive" role="alert">{youtube.error}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" disabled={youtube.verification.waiting} onClick={youtube.retry}>{t('youtube.retry', 'Retry')}</Button>
+                      <Button size="sm" variant="outline" disabled={youtube.verification.waiting} onClick={() => { void youtube.verification.verify(); }}>{t('youtube.verify', 'Verify in browser')}</Button>
+                      {youtube.verification.waiting && <Button size="sm" variant="ghost" onClick={youtube.verification.cancel}>{t('common.cancel', 'Cancel')}</Button>}
+                    </div>
+                    {youtube.verification.waiting && <p className="text-xs text-muted-foreground" role="status">{t('youtube.verifying', 'Enable the DLMan extension in the browser that opened. Complete verification on YouTube, then click Share session in the extension approval window. Waiting up to 10 minutes…')}</p>}
+                    {youtube.verification.error && <p className="text-sm text-destructive" role="alert">{youtube.verification.error}</p>}
+                  </div>
                 : <Select value={youtube.selection ? `${youtube.selection.output_mode}:${youtube.selection.format_id}` : ''} onValueChange={youtube.choose}>
                     <SelectTrigger><SelectValue placeholder={t('youtube.select', 'Select quality')} /></SelectTrigger>
                     <SelectContent>{youtube.preview?.variants.map((variant) => <SelectItem key={`${variant.output_mode}:${variant.id}`} value={`${variant.output_mode}:${variant.id}`}>

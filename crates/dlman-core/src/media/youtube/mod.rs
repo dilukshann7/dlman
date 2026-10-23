@@ -3,6 +3,7 @@ mod metadata;
 mod process;
 mod tools;
 mod transfer;
+mod verification;
 
 use crate::{DlmanCore, DlmanError};
 use dlman_types::*;
@@ -61,6 +62,7 @@ pub fn canonical_url(value: &str) -> Result<String, DlmanError> {
 
 struct InspectionEntry {
     url: String,
+    session_id: Option<Uuid>,
     created: Instant,
     result: YoutubeInspection,
 }
@@ -72,6 +74,7 @@ pub(crate) struct YoutubeTask {
 
 pub struct YoutubeService {
     root: RwLock<Option<PathBuf>>,
+    verification: Mutex<verification::VerificationStore>,
     inspections: Mutex<HashMap<Uuid, InspectionEntry>>,
     slots: Semaphore,
     inspection_tasks: Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>,
@@ -84,6 +87,7 @@ impl Default for YoutubeService {
     fn default() -> Self {
         Self {
             root: RwLock::new(None),
+            verification: Mutex::new(verification::VerificationStore::default()),
             inspections: Mutex::new(HashMap::new()),
             slots: Semaphore::new(2),
             inspection_tasks: Mutex::new(HashMap::new()),
@@ -95,6 +99,40 @@ impl Default for YoutubeService {
 }
 
 impl YoutubeService {
+    pub async fn begin_verification(&self, url: &str) -> Result<YoutubeVerification, DlmanError> {
+        self.verification.lock().await.begin(url)
+    }
+
+    pub async fn verification_ready(&self, id: Uuid) -> Result<bool, DlmanError> {
+        self.verification.lock().await.ready(id)
+    }
+
+    pub async fn cancel_verification(&self, id: Uuid) {
+        self.verification.lock().await.cancel(id);
+    }
+
+    pub async fn complete_verification(
+        &self,
+        request: YoutubeVerificationSubmission,
+    ) -> Result<(), DlmanError> {
+        self.verification
+            .lock()
+            .await
+            .complete(request.token, &request.url, request.cookies)
+    }
+
+    async fn browser_session(
+        &self,
+        url: &str,
+        required: bool,
+    ) -> Result<Option<Arc<verification::BrowserSession>>, DlmanError> {
+        let session = self.verification.lock().await.session(&canonical_url(url)?);
+        if required && session.is_none() {
+            return Err(media_error("YouTube browser verification expired or the app restarted. Verify this video again in Add Download, then Retry the existing download."));
+        }
+        Ok(session)
+    }
+
     /// Called once by the desktop host with Tauri's resolved resource directory.
     pub fn configure(&self, root: PathBuf) {
         *self.root.write().expect("media tools lock") = Some(root);
@@ -112,6 +150,8 @@ impl YoutubeService {
         proxy: ProxySettings,
     ) -> Result<YoutubeInspection, DlmanError> {
         let url = canonical_url(value)?;
+        let session = self.verification.lock().await.session(&url);
+        let session_id = session.as_ref().map(|session| session.id);
         let mut records = self.inspections.lock().await;
         records.retain(|_, entry| {
             entry.created.elapsed()
@@ -121,10 +161,9 @@ impl YoutubeService {
                     120
                 })
         });
-        if let Some(record) = records
-            .values()
-            .find(|entry| entry.url == url && entry.result.status != "failed")
-        {
+        if let Some(record) = records.values().find(|entry| {
+            entry.url == url && entry.session_id == session_id && entry.result.status != "failed"
+        }) {
             return Ok(record.result.clone());
         }
         if records.len() >= 64 {
@@ -145,6 +184,7 @@ impl YoutubeService {
             id,
             InspectionEntry {
                 url: url.clone(),
+                session_id,
                 created: Instant::now(),
                 result: result.clone(),
             },
@@ -155,7 +195,12 @@ impl YoutubeService {
             let inspected = async {
                 let tools = service.tools()?;
                 let value = tools
-                    .metadata(&url, &proxy, service.shutdown.child_token())
+                    .metadata(
+                        &url,
+                        &proxy,
+                        service.shutdown.child_token(),
+                        session.as_deref(),
+                    )
                     .await?;
                 parse_preview(&url, &value)
             }
@@ -258,6 +303,7 @@ impl YoutubeService {
         for task in tasks {
             let _ = task.join.await;
         }
+        self.verification.lock().await.clear();
     }
 }
 
@@ -284,6 +330,13 @@ impl DlmanCore {
             .youtube
             .validate_preview(inspection_id, url, &selection)
             .await?;
+        let requires_browser_session = self
+            .youtube
+            .inspections
+            .lock()
+            .await
+            .get(&inspection_id)
+            .is_some_and(|entry| entry.session_id.is_some());
         if !destination.is_absolute() {
             return Err(media_error("Choose an absolute destination folder."));
         }
@@ -316,6 +369,7 @@ impl DlmanCore {
             serde_json::to_value(YoutubeJob {
                 selection,
                 stage_dir: stage,
+                requires_browser_session,
             })
             .map_err(|_| media_error("Cannot persist YouTube selection."))?,
         );

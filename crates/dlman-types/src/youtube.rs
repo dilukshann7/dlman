@@ -54,6 +54,8 @@ impl YoutubeSelection {
 pub struct YoutubeJob {
     pub selection: YoutubeSelection,
     pub stage_dir: PathBuf,
+    #[serde(default)]
+    pub requires_browser_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,4 +69,30 @@ pub struct YoutubeInspection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YoutubeInspectRequest {
     pub url: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct YoutubeVerification {
+    pub id: Uuid,
+    pub url: String,
+}
+
+// Deliberately omit Debug: this payload contains browser credentials.
+#[derive(Clone, Deserialize)]
+pub struct YoutubeSessionCookie {
+    pub domain: String,
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub host_only: bool,
+    pub expires: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct YoutubeVerificationSubmission {
+    pub token: Uuid,
+    pub url: String,
+    pub cookies: Vec<YoutubeSessionCookie>,
 }

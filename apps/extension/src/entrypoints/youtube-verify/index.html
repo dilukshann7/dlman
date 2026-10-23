@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DLMan · YouTube verification</title>
+  </head>
+  <body>
+    <main>
+      <p class="brand">DLMan</p>
+      <h1>Share YouTube verification</h1>
+      <p>Complete any sign-in or bot check in the YouTube tab. Once the video plays, share its session with DLMan.</p>
+      <p id="video" class="video"></p>
+      <p class="detail">Only YouTube cookies are shared, for this video, for up to 30 minutes. They are removed when DLMan closes and are never included in download history or exports.</p>
+      <p id="status" role="status">Loading request…</p>
+      <div class="actions">
+        <button id="share" disabled>Share session</button>
+        <button id="cancel" class="secondary">Cancel</button>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

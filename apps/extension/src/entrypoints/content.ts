@@ -1,4 +1,5 @@
 import { isYoutubeHost } from '../../../../shared/youtube.mjs';
+import { offerYoutubeVerification } from '@/lib/youtube-verification';
 import { YoutubeController, resolveYoutubeMedia } from '@/lib/youtube';
 import { defineContentScript } from 'wxt/sandbox';
 import { VideoDetector } from '@/lib/video-detector';
@@ -15,6 +16,8 @@ export default defineContentScript({
   runAt: 'document_idle',
   
   main() {
+    offerYoutubeVerification();
+    window.addEventListener('hashchange', offerYoutubeVerification);
     console.log('[DLMan] Content script loaded');
 
     // Patterns for common downloadable file types

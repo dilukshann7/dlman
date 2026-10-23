@@ -226,7 +226,24 @@ pub async fn cancel_download(state: State<'_, AppState>, id: String) -> Result<(
         .await
 }
 
-/// Start a bounded inspection without holding a browser or Tauri request open.
+/// Begin an explicit, video-scoped browser verification challenge.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn begin_youtube_verification(state: State<'_, AppState>, url: String) -> Result<dlman_types::YoutubeVerification, String> {
+    state.with_core_async(|core| async move { core.youtube.begin_verification(&url).await }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_youtube_verification(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid verification ID")?;
+    state.with_core_async(|core| async move { core.youtube.verification_ready(id).await }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn cancel_youtube_verification(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid verification ID")?;
+    state.with_core_async(|core| async move { core.youtube.cancel_verification(id).await; Ok(()) }).await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn inspect_youtube(state: State<'_, AppState>, url: String) -> Result<dlman_types::YoutubeInspection, String> {
     state.with_core_async(|core| async move {

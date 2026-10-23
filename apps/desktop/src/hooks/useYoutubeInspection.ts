@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useYoutubeVerification } from './useYoutubeVerification';
 import { canonicalYoutubeUrl, isYoutubeHost, awaitYoutubeInspection, type YoutubeInspection, type YoutubePreview, type YoutubeSelection } from '../../../../shared/youtube.mjs';
 
 export function useYoutubeInspection(url: string, active: boolean, preferred?: YoutubeSelection) {
@@ -10,6 +11,7 @@ export function useYoutubeInspection(url: string, active: boolean, preferred?: Y
   const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const enabled = active && isYoutubeHost(url);
+  const verification = useYoutubeVerification(url, enabled, () => setAttempt((n) => n + 1));
   const currentUrl = useRef(url); currentUrl.current = url;
   useEffect(() => {
     let cancelled = false;
@@ -60,5 +62,5 @@ export function useYoutubeInspection(url: string, active: boolean, preferred?: Y
     setInspectionId(result.id);
     return result.id;
   }, [url, selection]);
-  return { enabled, preview, inspectionId, selection, loading, error, choose, refreshSelection, retry: () => setAttempt((n) => n + 1) };
+  return { enabled, preview, inspectionId, selection, loading, error, choose, refreshSelection, verification, retry: () => setAttempt((n) => n + 1) };
 }

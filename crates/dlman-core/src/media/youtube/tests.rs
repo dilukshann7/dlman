@@ -95,6 +95,7 @@ async fn inspection_tokens_expire_without_invalidating_stored_selections() {
         id,
         InspectionEntry {
             url: "x".into(),
+            session_id: None,
             created: Instant::now() - Duration::from_secs(121),
             result: YoutubeInspection {
                 id,

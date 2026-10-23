@@ -159,6 +159,9 @@ impl BrowserServer {
             .route("/api/media/download", post(handle_media_download))
             .route("/api/media/inspect", post(handle_youtube_inspect))
             .route("/api/media/inspect/:id", get(handle_youtube_inspection))
+            .route("/api/media/verify", post(handle_youtube_verification)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)))
+            .route("/api/media/verify/:id/cancel", post(handle_cancel_youtube_verification))
             // WebSocket for real-time events (optional)
             .route("/ws", get(handle_websocket))
             .layer(cors)
@@ -432,12 +435,39 @@ async fn handle_youtube_inspect(
         .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))
 }
 
+async fn handle_youtube_verification(
+    State(state): axum::extract::State<SharedState>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::YoutubeVerificationSubmission>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<ControlResponse>, (axum::http::StatusCode, String)> {
+    // A random, single-use token issued only through Tauri authorizes this submission.
+    // Never return the payload or arbitrary deserialization diagnostics to the caller.
+    let origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if !origin.is_empty() && !origin.starts_with("chrome-extension://") && !origin.starts_with("moz-extension://") {
+        return Err((axum::http::StatusCode::FORBIDDEN, "Use the DLMan extension to share verification.".into()));
+    }
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid browser verification payload.".into()))?;
+    let core = state.read().await.core.clone();
+    core.youtube.complete_verification(request).await
+        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(axum::Json(ControlResponse { success: true, error: None }))
+}
+
 async fn handle_youtube_inspection(
     State(state): axum::extract::State<SharedState>, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<axum::Json<dlman_types::YoutubeInspection>, (axum::http::StatusCode, String)> {
     let core = state.read().await.core.clone();
     core.youtube.inspection(id).await.map(axum::Json)
         .map_err(|error| (axum::http::StatusCode::NOT_FOUND, error.to_string()))
+}
+
+async fn handle_cancel_youtube_verification(
+    State(state): axum::extract::State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> axum::Json<ControlResponse> {
+    // The single-use challenge also authorizes cancellation; no session data is returned.
+    state.read().await.core.youtube.cancel_verification(id).await;
+    axum::Json(ControlResponse { success: true, error: None })
 }
 
 async fn handle_media_download(

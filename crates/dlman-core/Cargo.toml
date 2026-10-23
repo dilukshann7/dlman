@@ -46,6 +46,7 @@ directories = { workspace = true }
 fs2 = "0.4"
 async-trait = "0.1"
 sha2 = "0.10"
+tempfile = "3.24"
 
 # XML parsing (for DASH MPD)
 quick-xml = "0.36"
@@ -58,7 +59,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security", "Win32_Security_Authorization"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
