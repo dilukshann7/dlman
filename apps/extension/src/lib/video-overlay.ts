@@ -32,8 +32,8 @@ function shadowCSS(): string {
 .pill.hide{display:none}
 
 /* Favicon / logo */
-.logo{width:18px;height:18px;border-radius:4px;flex-shrink:0;background:linear-gradient(135deg,#3b82f6,#2563eb);display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(59,130,246,.4)}
-.logo svg{width:12px;height:12px;color:#fff}
+.logo{width:18px;height:18px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.logo img{width:18px;height:18px;object-fit:contain}
 
 /* Chevron for multi-quality */
 .chev{width:8px;height:8px;color:#888;margin-left:2px;transition:color .15s,transform .2s}
@@ -63,11 +63,6 @@ function shadowCSS(): string {
 // ============================================================================
 // SVG
 // ============================================================================
-
-/** Small download arrow for the logo badge */
-function logoSvg(): string {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
-}
 
 function chevSvg(): string {
   return `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
@@ -152,7 +147,10 @@ export class VideoOverlayManager {
     // Logo badge
     const logo = document.createElement('div');
     logo.className = 'logo';
-    logo.innerHTML = logoSvg();
+    const logoImage = document.createElement('img');
+    logoImage.src = new URL('icon/48.png', browser.runtime.getURL('/')).href;
+    logoImage.alt = 'DLMan';
+    logo.appendChild(logoImage);
     pill.appendChild(logo);
 
     // Label
