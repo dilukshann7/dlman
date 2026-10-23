@@ -21,6 +21,18 @@ pub struct Download {
     pub id: Uuid,
     pub url: String,
     pub final_url: Option<String>,
+    /// Original browser page, when known (separate from the expiring file URL).
+    #[serde(default)]
+    pub source_page_url: Option<String>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub supports_range: bool,
+    /// Scratch directory retained across changes to the temp-storage policy.
+    #[serde(default)]
+    pub segment_cache_dir: Option<PathBuf>,
     pub filename: String,
     pub destination: PathBuf,
     pub size: Option<u64>,
@@ -58,6 +70,11 @@ impl Download {
             id: Uuid::new_v4(),
             url,
             final_url: None,
+            source_page_url: None,
+            etag: None,
+            last_modified: None,
+            supports_range: false,
+            segment_cache_dir: None,
             filename,
             destination,
             size: None,

@@ -47,7 +47,7 @@ import { useUIStore } from '@/stores/ui';
 import { useQueuesArray, useQueueStore } from '@/stores/queues';
 import { useDownloadStore } from '@/stores/downloads';
 import { useCategoryStore } from '@/stores/categories';
-import { getPendingClipboardUrls, getPendingDropUrls, getPendingCookies, getPendingMediaMeta } from '@/lib/events';
+import { getPendingClipboardUrls, getPendingDropUrls, getPendingCookies, getPendingMediaMeta, getPendingSourcePage } from '@/lib/events';
 import { getDefaultBasePath, getCategoryDownloadPath, detectCategoryFromFilename } from '@/lib/download-path';
 import type { LinkInfo, Download as DownloadType } from '@/types';
 
@@ -98,6 +98,7 @@ export function NewDownloadDialog() {
   // Trigger to force re-probe when dialog opens (even with same URL)
   const [probeTrigger, setProbeTrigger] = useState(0);
   // Browser cookies passed from extension for session-based auth
+  const [sourcePageUrl, setSourcePageUrl] = useState<string | undefined>(undefined);
   const [browserCookies, setBrowserCookies] = useState<string | undefined>(undefined);
   // Media metadata for HLS/DASH streaming downloads (from browser extension)
   const [mediaMeta, setMediaMeta] = useState<{
@@ -139,6 +140,7 @@ export function NewDownloadDialog() {
     // Check for pending cookies from browser extension
     const cookies = getPendingCookies();
     setBrowserCookies(cookies);
+    setSourcePageUrl(getPendingSourcePage());
     
     // Check for media metadata (HLS/DASH streaming)
     const meta = getPendingMediaMeta();
@@ -301,7 +303,7 @@ export function NewDownloadDialog() {
     try {
       const text = await navigator.clipboard.readText();
       if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
-        setMediaMeta(undefined); setBrowserCookies(undefined);
+        setMediaMeta(undefined); setBrowserCookies(undefined); setSourcePageUrl(undefined);
         setUrl(text);
       }
     } catch (err) {
@@ -454,6 +456,7 @@ export function NewDownloadDialog() {
             probed_info: probedInfo,
             start_later: startLater,
             cookies: browserCookies || undefined,
+            source_page_url: sourcePageUrl || undefined,
           });
         }
         
@@ -471,7 +474,7 @@ export function NewDownloadDialog() {
         toast.error(t('toasts.addDownloadFailed'), { description: errorMsg });
       }
     }
-  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, mediaMeta, youtube, youtubeUnavailable, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
+  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, sourcePageUrl, mediaMeta, youtube, youtubeUnavailable, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
 
   const formatFileSize = (bytes: number) => {
     if (bytes >= 1024 * 1024 * 1024) {
@@ -514,7 +517,7 @@ export function NewDownloadDialog() {
                 <Input
                   id="url"
                   value={url}
-                  onChange={(e) => { setMediaMeta(undefined); setBrowserCookies(undefined); setUrl(e.target.value); }}
+                  onChange={(e) => { setMediaMeta(undefined); setBrowserCookies(undefined); setSourcePageUrl(undefined); setUrl(e.target.value); }}
                   placeholder={t('newDownload.urlPlaceholder')}
                   className="h-11 pr-10"
                 />

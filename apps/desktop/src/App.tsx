@@ -14,6 +14,7 @@ import {
   BulkDeleteConfirmDialog,
   CredentialPromptDialog,
 } from "@/components/dialogs";
+import { RefreshDownloadAddressDialog } from "@/components/dialogs/RefreshDownloadAddressDialog";
 import { DropZoneOverlay } from "@/components/DropZoneOverlay";
 import { ContextMenuProvider } from "@/components/ContextMenu";
 import { DndProvider } from "@/components/dnd/DndProvider";
@@ -239,6 +240,7 @@ function AppContent() {
       
       {/* Dialogs */}
       <NewDownloadDialog />
+      <RefreshDownloadAddressDialog />
       <BatchImportDialog />
       <SettingsDialog />
       <QueueManagerDialog />

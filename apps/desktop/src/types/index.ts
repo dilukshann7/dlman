@@ -4,6 +4,11 @@ export interface Download {
   id: string;
   url: string;
   final_url: string | null;
+  source_page_url?: string | null;
+  etag?: string | null;
+  last_modified?: string | null;
+  supports_range?: boolean;
+  segment_cache_dir?: string | null;
   filename: string;
   destination: string;
   size: number | null;

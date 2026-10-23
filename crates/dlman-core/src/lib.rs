@@ -500,6 +500,7 @@ impl DlmanCore {
     /// Retry a failed download
     /// This continues from existing progress when possible, rather than starting over
     pub async fn retry_download(&self, id: Uuid) -> Result<(), DlmanError> {
+        let operation = self.download_manager.edit_guard(id).await?;
         let mut download = self.get_download(id).await?;
         if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
             return self.start_youtube(id).await;
@@ -564,6 +565,7 @@ impl DlmanCore {
         drop(settings);
         
         // Start immediately
+        drop(operation);
         let credentials = self.find_credentials_for_download(&download.url).await;
         self.download_manager.start(
             download,
@@ -708,6 +710,8 @@ impl DlmanCore {
         // Move downloads to default queue
         let downloads = self.download_manager.db().get_downloads_by_queue(id).await?;
         for mut download in downloads {
+            let _operation = self.download_manager.edit_guard(download.id).await?;
+            download = self.get_download(download.id).await?;
             download.queue_id = Uuid::nil();
             self.download_manager.db().upsert_download(&download).await?;
         }
@@ -794,6 +798,7 @@ impl DlmanCore {
         
         // Update downloads
         for id in ids {
+            let operation = self.download_manager.edit_guard(id).await?;
             let mut download = self.get_download(id).await?;
             let restart_youtube = download.youtube.is_some() && download.status == DownloadStatus::Downloading;
             if restart_youtube {
@@ -805,6 +810,7 @@ impl DlmanCore {
             download.speed_limit = None;
             self.download_manager.db().upsert_download(&download).await?;
             
+            drop(operation);
             // YouTube's rate is a process argument; restart against the same stage.
             if restart_youtube { self.start_youtube(id).await?; }
             // Update speed limit if download is active

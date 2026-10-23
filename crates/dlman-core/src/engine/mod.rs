@@ -12,6 +12,9 @@ mod rate_limiter;
 mod segment_worker;
 mod download_task;
 mod manager;
+pub mod refresh;
+mod service_refresh;
+pub use service_refresh::ReleasedRefreshCapture;
 
 pub use persistence::*;
 pub use rate_limiter::*;

@@ -51,6 +51,8 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { DeleteConfirmDialog } from "@/components/dialogs/DeleteConfirmDialog";
+import { useDownloadRefresh } from "@/stores/download-refresh";
+import { canRefreshDownload } from "../../../../../shared/download-refresh.mjs";
 import { useDownloadStore } from "@/stores/downloads";
 import { useQueueStore, useQueuesArray } from "@/stores/queues";
 import { useCategoryStore } from "@/stores/categories";
@@ -435,6 +437,13 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
         )}
 
         <MenuSeparator />
+
+        {canRefreshDownload(download) && (
+          <MenuItem onClick={() => void useDownloadRefresh.getState().open(download)}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            {t('refreshAddress.title')}
+          </MenuItem>
+        )}
 
         {/* Info */}
         <MenuItem onClick={handleShowInfo}>

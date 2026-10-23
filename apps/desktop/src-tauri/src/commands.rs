@@ -42,6 +42,7 @@ pub async fn add_download(
     probed_info: Option<ProbedInfo>,
     start_later: Option<bool>,
     cookies: Option<String>,
+    source_page_url: Option<String>,
 ) -> Result<Download, String> {
     tracing::info!("[add_download] URL={} start_later={:?}", &url, start_later);
     // Auto-detect HLS/DASH streaming URLs and route to the streaming pipeline.
@@ -71,7 +72,7 @@ pub async fn add_download(
 
     state
         .with_core_async(|core| async move { 
-            let mut download = core.add_download(&url, dest_path, queue_uuid, category_uuid, cookies.clone(), auto_start).await?;
+            let mut download = core.add_download(&url, dest_path, queue_uuid, category_uuid, cookies.clone(), false).await?;
 
             // Apply probed info if provided (filename, size from dialog probe)
             if let Some(info) = probed_info {
@@ -109,6 +110,10 @@ pub async fn add_download(
                 }
             }
             
+            download.source_page_url = source_page_url.filter(|url| dlman_core::engine::refresh::http_url(url).is_ok());
+            core.download_manager.db().upsert_download(&download).await?;
+            core.emit(dlman_types::CoreEvent::DownloadUpdated { download: download.clone() });
+            if auto_start { core.resume_download(download.id).await?; }
             Ok(download)
         })
         .await
@@ -208,6 +213,56 @@ pub async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(
     state
         .with_core_async(|core| async move { core.resume_download(uuid).await })
         .await
+}
+
+#[tauri::command]
+pub async fn begin_download_refresh(state: State<'_, AppState>, id: String) -> Result<dlman_core::engine::refresh::RefreshSessionInfo, String> {
+    let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state.with_core_async(|core| async move { core.download_manager.begin_refresh(id).await }).await
+}
+
+#[derive(serde::Serialize)]
+pub struct RefreshAddressResult {
+    download: Download,
+    started: bool,
+    error: Option<String>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn refresh_download_address(
+    state: State<'_, AppState>, session_id: String, url: Option<String>, candidate_id: Option<String>,
+) -> Result<RefreshAddressResult, String> {
+    let session_id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let candidate_id = candidate_id.map(|id| Uuid::parse_str(&id)).transpose().map_err(|e| e.to_string())?;
+    state.with_core_async(|core| async move {
+        let mut download = core.download_manager.refresh_address(session_id, url, candidate_id).await?;
+        let started = core.resume_download(download.id).await.is_ok();
+        download.cookies = None;
+        Ok(RefreshAddressResult { download, started, error: if started { None } else {
+            Some("Address saved, but the download could not start. Try Resume again.".into())
+        } })
+    }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn cancel_download_refresh(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let session_id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    state.with_core_async(|core| async move { core.download_manager.cancel_refresh(session_id).await; Ok(()) }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn release_refresh_candidate(
+    app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, candidate_id: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let session_id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let candidate_id = Uuid::parse_str(&candidate_id).map_err(|e| e.to_string())?;
+    let capture = state.with_core_async(|core| async move {
+        let capture = core.download_manager.release_refresh_candidate(session_id, candidate_id).await?;
+        core.download_manager.cancel_refresh(session_id).await;
+        Ok(capture)
+    }).await?;
+    app.emit("show-new-download-dialog", capture).map_err(|_| "Could not open the new-download dialog.".to_string())
 }
 
 #[tauri::command]
@@ -347,6 +402,7 @@ pub async fn update_download(
                 core.update_download_speed_limit(uuid, speed_limit).await?;
             }
 
+            let _operation = core.download_manager.edit_guard(uuid).await?;
             // Get download for other updates
             let mut download = core.get_download(uuid).await?;
             let mut needs_db_update = false;
@@ -812,6 +868,8 @@ pub async fn move_download_file(
 ) -> Result<(), String> {
     let download_uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
     let new_dest_path = PathBuf::from(&new_destination);
+    let operation_core = state.with_core_async(|core| async move { Ok(core) }).await?;
+    let _operation = operation_core.download_manager.edit_guard(download_uuid).await.map_err(String::from)?;
     
     // Get the download from core
     let download = state
@@ -821,6 +879,10 @@ pub async fn move_download_file(
         .await
         .map_err(|e| e.to_string())?;
     
+    if download.status != dlman_types::DownloadStatus::Completed {
+        return Err("Only completed downloads can move their output file.".into());
+    }
+
     // Build source and destination paths
     let source_path = PathBuf::from(&download.destination).join(&download.filename);
     let dest_file_path = new_dest_path.join(&download.filename);

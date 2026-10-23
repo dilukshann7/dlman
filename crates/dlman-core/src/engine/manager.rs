@@ -14,18 +14,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{info, warn, error};
 use uuid::Uuid;
 
 /// Download manager that coordinates all downloads
 pub struct DownloadManager {
     /// Active download tasks
-    active_tasks: Arc<RwLock<HashMap<Uuid, DownloadTaskHandle>>>,
+    pub(super) active_tasks: Arc<RwLock<HashMap<Uuid, DownloadTaskHandle>>>,
+    pub(super) operation: Mutex<()>,
+    pub(super) refresh: Arc<Mutex<Option<super::refresh::RefreshSession>>>,
+    pub(super) scoped_client: Client,
     /// HTTP client
     client: Client,
     /// Database
-    db: DownloadDatabase,
+    pub(super) db: DownloadDatabase,
     /// DLMan's per-user data directory (system disk). Used to resolve the
     /// scratch directory for the `auto`/`appdata` temp-storage policies.
     data_dir: PathBuf,
@@ -34,11 +37,11 @@ pub struct DownloadManager {
     /// recreating the manager.
     temp_storage: Arc<RwLock<TempStorageSettings>>,
     /// Event broadcaster
-    event_tx: broadcast::Sender<CoreEvent>,
+    pub(super) event_tx: broadcast::Sender<CoreEvent>,
 }
 
 /// Handle to a running download task
-struct DownloadTaskHandle {
+pub(super) struct DownloadTaskHandle {
     /// Join handle for the task
     _task_handle: tokio::task::JoinHandle<Result<(), DlmanError>>,
     /// Shared references for control
@@ -50,11 +53,17 @@ struct DownloadTaskHandle {
 
 /// Build an HTTP client with optional proxy settings
 pub fn build_http_client(proxy_settings: Option<&ProxySettings>) -> Result<Client, DlmanError> {
+    build_client(proxy_settings, true)
+}
+
+fn build_client(proxy_settings: Option<&ProxySettings>, redirects: bool) -> Result<Client, DlmanError> {
     let mut builder = Client::builder()
         .user_agent(crate::USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(120));
     
+    if !redirects { builder = builder.redirect(reqwest::redirect::Policy::none()); }
+
     // Configure proxy based on settings
     if let Some(proxy) = proxy_settings {
         match proxy.mode.as_str() {
@@ -139,6 +148,9 @@ impl DownloadManager {
         Ok(Self {
             active_tasks: Arc::new(RwLock::new(HashMap::new())),
             client,
+            scoped_client: build_client(proxy_settings, false)?,
+            operation: Mutex::new(()),
+            refresh: Arc::new(Mutex::new(None)),
             db,
             data_dir,
             temp_storage: Arc::new(RwLock::new(TempStorageSettings::default())),
@@ -154,7 +166,18 @@ impl DownloadManager {
     }
 
     /// Resolve the scratch directory for a download under the current policy.
-    async fn resolve_temp_dir(&self, download: &Download) -> PathBuf {
+    pub(super) async fn resolve_temp_dir(&self, download: &Download) -> PathBuf {
+        if let Some(directory) = &download.segment_cache_dir { return directory.clone(); }
+        let policy = self.temp_storage.read().await.clone();
+        // Legacy jobs did not persist their cache location. Find existing parts
+        // before applying today's storage policy.
+        for directory in candidate_cache_dirs(&policy, &download.destination, &self.data_dir) {
+            for segment in &download.segments {
+                if tokio::fs::try_exists(directory.join(format!("{}_segment_{}.part", download.id, segment.index))).await.unwrap_or(false) {
+                    return directory;
+                }
+            }
+        }
         let policy = self.temp_storage.read().await.clone();
         resolve_segment_cache_dir(&policy, &download.destination, &self.data_dir, download.size)
     }
@@ -162,6 +185,7 @@ impl DownloadManager {
     /// Update the HTTP client with new proxy settings
     pub fn update_proxy(&mut self, proxy_settings: Option<&ProxySettings>) -> Result<(), DlmanError> {
         self.client = build_http_client(proxy_settings)?;
+        self.scoped_client = build_client(proxy_settings, false)?;
         Ok(())
     }
     
@@ -322,10 +346,21 @@ impl DownloadManager {
         segment_count: u32,
         max_retries: u32,
         retry_delay_secs: u32,
-        credentials: Option<(String, String)>,
+        _credentials: Option<(String, String)>,
     ) -> Result<(), DlmanError> {
         let id = download.id;
+        let _operation = self.edit_guard(id).await?;
+        // A caller may have loaded a snapshot before a completed refresh.
+        let download = self.db.load_download(id).await?.ok_or(DlmanError::NotFound(id))?;
+        if matches!(download.status, DownloadStatus::Cancelled | DownloadStatus::Completed | DownloadStatus::Deleted) {
+            return Err(DlmanError::InvalidOperation("This download cannot be started.".into()));
+        }
         
+        // Caller credentials may come from a pre-refresh URL snapshot. Resolve
+        // credentials for the persisted address while holding its mutation guard.
+        let credentials = self.db.find_credentials_for_url(&download.url).await?.into_iter()
+            .find(|credential| credential.enabled).map(|credential| (credential.username, credential.password));
+
         // Use write lock from the start to prevent race conditions
         // This ensures atomicity: check-then-insert happens under a single lock
         let mut active_tasks = self.active_tasks.write().await;
@@ -372,7 +407,7 @@ impl DownloadManager {
         let task = DownloadTask::new_with_credentials(
             download,
             temp_dir,
-            self.client.clone(),
+            self.scoped_client.clone(),
             download_rate_limiter,
             self.db.clone(),
             self.event_tx.clone(),
@@ -385,8 +420,18 @@ impl DownloadManager {
         );
         
         // Spawn task with cleanup
+        let failure_db = self.db.clone();
+        let failure_tx = self.event_tx.clone();
         let task_handle = tokio::spawn(async move {
             let result = task.run().await;
+            // Probe/setup errors happen before the task's transfer error handler.
+            if let Err(error) = &result {
+                if !matches!(error, DlmanError::Paused | DlmanError::Cancelled) && failure_db.load_download(task_id).await.ok().flatten().is_some_and(|d| d.status == DownloadStatus::Downloading) {
+                    let message = error.to_string();
+                    let _ = failure_db.update_download_status(task_id, DownloadStatus::Failed, Some(message.clone())).await;
+                    let _ = failure_tx.send(CoreEvent::DownloadStatusChanged { id: task_id, status: DownloadStatus::Failed, error: Some(message) });
+                }
+            }
             // Remove from active tasks when done
             active_tasks_for_cleanup.write().await.remove(&task_id);
             result
@@ -449,6 +494,9 @@ impl DownloadManager {
         {
             let tasks = self.active_tasks.read().await;
             if let Some(handle) = tasks.get(&id) {
+                if handle.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(DlmanError::InvalidOperation("Download workers are still stopping. Try again shortly.".into()));
+                }
                 // Task still running, just unpause
                 handle.paused.store(false, std::sync::atomic::Ordering::Release);
                 info!("Unpaused running download {}", id);
@@ -490,9 +538,13 @@ impl DownloadManager {
     
     /// Cancel a download
     pub async fn cancel(&self, id: Uuid) -> Result<(), DlmanError> {
+        let _operation = self.operation.lock().await;
+        let mut refresh = self.refresh.lock().await;
+        if refresh.as_ref().is_some_and(|s| s.info.download_id == id) { *refresh = None; }
+        drop(refresh);
         let mut tasks = self.active_tasks.write().await;
         
-        if let Some(handle) = tasks.remove(&id) {
+        if let Some(handle) = tasks.get(&id) {
             handle.cancelled.store(true, std::sync::atomic::Ordering::Release);
             info!("Cancelled download {}", id);
         }
@@ -542,7 +594,10 @@ impl DownloadManager {
             // appdata, custom) rather than just the currently-resolved one, so
             // changing the temp-storage policy mid-flight never leaves orphans.
             let policy = self.temp_storage.read().await.clone();
-            let cache_dirs = candidate_cache_dirs(&policy, &download.destination, &self.data_dir);
+            let mut cache_dirs = candidate_cache_dirs(&policy, &download.destination, &self.data_dir);
+            if let Some(saved) = &download.segment_cache_dir {
+                if !cache_dirs.contains(saved) { cache_dirs.push(saved.clone()); }
+            }
             for cache_dir in &cache_dirs {
                 for segment in &download.segments {
                     let temp_path = cache_dir.join(format!(
@@ -576,6 +631,7 @@ impl DownloadManager {
         speed_limit: Option<u64>,
         effective_limit: Option<u64>,
     ) -> Result<(), DlmanError> {
+        let _operation = self.edit_guard(id).await?;
         // Update in DB (store the user's setting, not the resolved value)
         let download = self.db.load_download(id).await?
             .ok_or(DlmanError::NotFound(id))?;

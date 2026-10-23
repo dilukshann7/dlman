@@ -181,6 +181,13 @@ impl DownloadDatabase {
             sqlx::query("ALTER TABLE downloads ADD COLUMN youtube TEXT").execute(pool).await?;
         }
 
+        for column in ["source_page_url", "segment_cache_dir"] {
+            if !columns.iter().any(|row| row.get::<String, _>("name") == column) {
+                sqlx::query(&format!("ALTER TABLE downloads ADD COLUMN {column} TEXT"))
+                    .execute(pool).await?;
+            }
+        }
+
         // Migration: Add cookies column to downloads table if it doesn't exist
         sqlx::query(
             r#"
@@ -205,8 +212,8 @@ impl DownloadDatabase {
                 id, url, final_url, filename, destination, size, downloaded,
                 status, queue_id, category_id, color, error, speed_limit,
                 created_at, completed_at, retry_count, etag, last_modified, supports_range,
-                cookies, youtube
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cookies, youtube, source_page_url, segment_cache_dir
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 final_url = excluded.final_url,
@@ -226,7 +233,9 @@ impl DownloadDatabase {
                 last_modified = excluded.last_modified,
                 supports_range = excluded.supports_range,
                 cookies = excluded.cookies,
-                youtube = excluded.youtube
+                youtube = excluded.youtube,
+                source_page_url = excluded.source_page_url,
+                segment_cache_dir = excluded.segment_cache_dir
             "#,
         )
         .bind(download.id.to_string())
@@ -245,11 +254,13 @@ impl DownloadDatabase {
         .bind(download.created_at.to_rfc3339())
         .bind(download.completed_at.map(|d| d.to_rfc3339()))
         .bind(download.retry_count as i64)
-        .bind(None::<String>) // etag - will add later
-        .bind(None::<String>) // last_modified - will add later
-        .bind(0i64) // supports_range - will add later
+        .bind(download.etag.as_ref())
+        .bind(download.last_modified.as_ref())
+        .bind(if download.supports_range { 1i64 } else { 0i64 })
         .bind(download.cookies.as_ref())
         .bind(download.youtube.as_ref().map(|value| value.to_string()))
+        .bind(download.source_page_url.as_ref())
+        .bind(download.segment_cache_dir.as_ref().map(|p| p.to_string_lossy().to_string()))
         .execute(&mut *tx)
         .await?;
         
@@ -284,6 +295,28 @@ impl DownloadDatabase {
         Ok(())
     }
     
+    /// Load a download by ID
+    pub async fn rebind_download(&self, download: &Download) -> Result<(), DlmanError> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query("UPDATE downloads SET url = ?, final_url = ?, source_page_url = ?, cookies = ?, etag = ?, last_modified = ?, supports_range = ?, size = ?, downloaded = ?, segment_cache_dir = ?, status = 'paused', error = NULL, retry_count = 0 WHERE id = ? AND status IN ('paused', 'failed')")
+            .bind(&download.url).bind(&download.final_url).bind(&download.source_page_url)
+            .bind(&download.cookies).bind(&download.etag).bind(&download.last_modified)
+            .bind(if download.supports_range { 1i64 } else { 0i64 })
+            .bind(download.size.map(|n| n as i64)).bind(download.downloaded as i64)
+            .bind(download.segment_cache_dir.as_ref().map(|p| p.to_string_lossy().to_string()))
+            .bind(download.id.to_string()).execute(&mut *tx).await?;
+        if result.rows_affected() != 1 {
+            return Err(DlmanError::InvalidOperation("Download changed while refreshing its address.".into()));
+        }
+        for segment in &download.segments {
+            sqlx::query("UPDATE segments SET downloaded_bytes = ?, complete = ?, end_byte = ? WHERE download_id = ? AND segment_index = ?")
+                .bind(segment.downloaded as i64).bind(if segment.complete { 1i64 } else { 0i64 }).bind(segment.end as i64)
+                .bind(download.id.to_string()).bind(segment.index as i64).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Load a download by ID
     pub async fn load_download(&self, id: Uuid) -> Result<Option<Download>, DlmanError> {
         let row = sqlx::query(
@@ -750,6 +783,11 @@ fn row_to_download(row: sqlx::sqlite::SqliteRow, segments: Vec<Segment>) -> Resu
             .map_err(|e| DlmanError::Unknown(e.to_string()))?,
         url: row.get("url"),
         final_url: row.get("final_url"),
+        source_page_url: row.get("source_page_url"),
+        segment_cache_dir: row.get::<Option<String>, _>("segment_cache_dir").map(PathBuf::from),
+        etag: row.get("etag"),
+        last_modified: row.get("last_modified"),
+        supports_range: row.get::<i64, _>("supports_range") != 0,
         filename: row.get("filename"),
         destination: PathBuf::from(row.get::<String, _>("destination")),
         size: row.get::<Option<i64>, _>("size").map(|s| s as u64),

@@ -693,5 +693,25 @@
     "subtitle": "Fast, modern download manager with multi-segment acceleration",
     "tip": "Tip: Paste links with Ctrl+V or drag & drop URLs anywhere",
     "title": "Welcome to DLMan"
+  },
+  "refreshAddress": {
+    "title": "Refresh download address",
+    "description": "Replace an expired file link while keeping this download and its saved progress.",
+    "saved": "{{size}} saved",
+    "browserInstructions": "Open the source page, then start downloading the same file again. Confirm the captured link here, or paste a replacement below.",
+    "noSourcePage": "The original page is unknown. Visit it manually and download the same file again, or paste a fresh file URL below.",
+    "openSourcePage": "Open source page",
+    "openFailed": "Could not open the source page.",
+    "candidate": "Is this the replacement for this download?",
+    "useLink": "Use this link",
+    "addAsNew": "Add as new download",
+    "replacementUrl": "Replacement file URL",
+    "verifyResume": "Verify & Resume",
+    "waiting": "Waiting for a browser download or a pasted URL. Verification checks up to three byte samples; it does not prove the entire file is identical.",
+    "verifying": "Preparing or verifying the replacement. Saved partial files will be kept.",
+    "success": "Download address refreshed. Resuming download.",
+    "expired": "Address refresh expired. Open it again to continue.",
+    "cancelFailed": "Could not cancel address refresh. Try again.",
+    "resumeFailed": "Address saved. Try Resume to continue the download."
   }
 }

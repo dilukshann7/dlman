@@ -6,6 +6,7 @@
 use crate::engine::rate_limiter::RateLimiter;
 use crate::engine::persistence::DownloadDatabase;
 use crate::error::DlmanError;
+use super::refresh::{invalid, parse_content_range, send_scoped, strong_etag, validate_response_for_file};
 use dlman_types::{CoreEvent, Segment};
 use futures::StreamExt;
 use reqwest::Client;
@@ -43,6 +44,10 @@ pub struct SegmentWorker {
     credentials: Option<(String, String)>, // (username, password)
     /// Optional browser cookies for session-based authentication
     cookies: Option<String>,
+    expected_total: Option<u64>,
+    etag: Option<String>,
+    referrer: Option<String>,
+    allow_html: bool,
 }
 
 impl SegmentWorker {
@@ -79,6 +84,10 @@ impl SegmentWorker {
             downloaded_bytes,
             credentials: None,
             cookies: None,
+            expected_total: None,
+            etag: None,
+            referrer: None,
+            allow_html: false,
         }
     }
     
@@ -117,9 +126,28 @@ impl SegmentWorker {
             downloaded_bytes,
             credentials,
             cookies,
+            expected_total: None,
+            etag: None,
+            referrer: None,
+            allow_html: false,
         }
     }
     
+    pub fn with_http_context(mut self, total: Option<u64>, etag: Option<String>, referrer: Option<String>, allow_html: bool) -> Self {
+        self.expected_total = total;
+        self.etag = etag;
+        self.referrer = referrer;
+        self.allow_html = allow_html;
+        self
+    }
+
+    async fn rollback_attempt(&mut self, file: &mut tokio::fs::File, original: u64) -> Result<(), DlmanError> {
+        file.set_len(original).await?;
+        self.downloaded_bytes.fetch_sub(self.segment.downloaded - original, Ordering::AcqRel);
+        self.segment.downloaded = original;
+        self.save_progress().await
+    }
+
     /// Run the segment download
     pub async fn run(mut self) -> Result<SegmentResult, DlmanError> {
         info!(
@@ -129,6 +157,7 @@ impl SegmentWorker {
         
         // Track if we discover the total size during download
         let mut discovered_size: Option<u64> = None;
+        if self.segment.end < self.segment.start { return Err(invalid("Saved segment boundaries are inconsistent.")); }
         
         // Check if segment is already complete
         if self.segment.complete {
@@ -150,6 +179,9 @@ impl SegmentWorker {
         // Check existing file size for resume
         // For unknown size segments, we always resume from whatever we have
         let existing_size = file.metadata().await?.len();
+        if existing_size < self.segment.downloaded || (!self.segment.is_unknown_size() && existing_size > self.segment.size()) {
+            return Err(invalid("Partial segment length is inconsistent; file was preserved."));
+        }
         if existing_size > 0 {
             // For unknown size, always resume; for known size, only if within bounds
             if self.segment.is_unknown_size() || existing_size <= self.segment.size() {
@@ -163,12 +195,12 @@ impl SegmentWorker {
         }
         
         // Calculate actual byte range to download
-        let start_byte = self.segment.start + self.segment.downloaded;
+        let start_byte = self.segment.start.checked_add(self.segment.downloaded).ok_or_else(|| invalid("Invalid segment offset."))?;
         let end_byte = self.segment.end;
         let unknown_size = end_byte == u64::MAX;
         
         // For unknown size, we don't know if we're done until the stream ends
-        if !unknown_size && start_byte >= end_byte {
+        if !unknown_size && start_byte > end_byte {
             // Already complete
             self.segment.complete = true;
             self.db
@@ -188,35 +220,16 @@ impl SegmentWorker {
         // Build HTTP request
         // For unknown size (end = MAX), use open-ended range "bytes=N-"
         // For known size, use "bytes=N-M"
-        let mut request = if unknown_size {
-            if start_byte == 0 {
-                // No resume, just download from the beginning
-                self.client.get(&self.url)
-            } else {
-                // Resume from start_byte with open-ended range
-                self.client
-                    .get(&self.url)
-                    .header("Range", format!("bytes={}-", start_byte))
-            }
-        } else {
-            // Known size, use specific range
-            let range_header = format!("bytes={}-{}", start_byte, end_byte);
-            debug!("Segment {} requesting range: {}", self.segment.index, range_header);
-            self.client.get(&self.url).header("Range", range_header)
-        };
-        
-        // Apply credentials if available (HTTP Basic Auth)
-        if let Some((ref username, ref password)) = self.credentials {
-            request = request.basic_auth(username, Some(password));
-        }
-        
-        // Apply browser cookies if available (session-based auth)
-        if let Some(ref cookies) = self.cookies {
-            request = request.header(reqwest::header::COOKIE, cookies);
-        }
-        
-        let response = request.send().await?;
-        
+        let range = if unknown_size {
+            if start_byte == 0 { None } else { Some(format!("bytes={start_byte}-")) }
+        } else { Some(format!("bytes={start_byte}-{end_byte}")) };
+        // Apply credentials if available (HTTP Basic Auth).
+        // Apply browser cookies if available (session-based auth).
+        // Redirect handling scopes both to their original origin.
+        let response = send_scoped(&self.client, reqwest::Method::GET, &self.url,
+            self.cookies.as_deref(), self.credentials.as_ref(), self.referrer.as_deref(),
+            range.as_deref(), strong_etag(self.etag.as_deref())).await?;
+
         // Check response status
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -239,39 +252,44 @@ impl SegmentWorker {
             });
         }
         
-        // If we have unknown size, try to detect it from response headers
-        if unknown_size {
-            // Try Content-Range first (for 206 responses): "bytes 0-X/12345"
-            if let Some(content_range) = response.headers().get(reqwest::header::CONTENT_RANGE) {
-                if let Ok(range_str) = content_range.to_str() {
-                    if let Some(total) = range_str.split('/').last() {
-                        if total != "*" {
-                            if let Ok(total_size) = total.parse::<u64>() {
-                                info!("Got total size from Content-Range: {} bytes", total_size);
-                                self.segment.end = total_size.saturating_sub(1);
-                                discovered_size = Some(total_size);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Try Content-Length for 200 OK responses (full content)
-            if self.segment.end == u64::MAX {
-                if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
-                    if let Ok(len_str) = content_length.to_str() {
-                        if let Ok(len) = len_str.parse::<u64>() {
-                            // If resuming, add existing downloaded to get total
-                            let total = if start_byte > 0 { start_byte + len } else { len };
-                            info!("Got total size from Content-Length: {} bytes", total);
-                            self.segment.end = total.saturating_sub(1);
-                            discovered_size = Some(total);
-                        }
-                    }
-                }
-            }
+        validate_response_for_file(&response, self.allow_html)?;
+        if let (Some(expected), Some(actual)) = (strong_etag(self.etag.as_deref()),
+            strong_etag(response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()))) {
+            if expected != actual { return Err(invalid("Download resource changed; partial data was preserved.")); }
         }
-        
+        let expected_body;
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // Try Content-Range first (for 206 responses): "bytes 0-X/12345".
+            let value = response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok())
+                .ok_or_else(|| invalid("Missing Content-Range; partial data was preserved."))?;
+            let (actual_start, actual_end, total) = parse_content_range(value)?;
+            if actual_start != start_byte || (!unknown_size && actual_end != end_byte)
+                || (unknown_size && actual_end != total - 1)
+                || self.expected_total.is_some_and(|expected| expected != total) {
+                return Err(invalid("Server returned a different byte range or file size."));
+            }
+            expected_body = Some(actual_end - actual_start + 1);
+            if unknown_size {
+                self.segment.end = total - 1;
+                discovered_size = Some(total);
+            }
+        } else if status == reqwest::StatusCode::OK && start_byte == 0 && self.segment.start == 0 {
+            // Try Content-Length for 200 OK responses (full content).
+            // A full response is safe only for a fresh, whole-file segment.
+            let length = response.content_length();
+            if !unknown_size && (length != Some(self.segment.size()) || self.expected_total.is_some_and(|total| total != self.segment.size())) {
+                return Err(invalid("Server ignored a segmented range; partial data was preserved."));
+            }
+            expected_body = length;
+            if unknown_size {
+                if let Some(total) = length.filter(|n| *n > 0) {
+                    self.segment.end = total - 1;
+                    discovered_size = Some(total);
+                }
+            }
+        } else { return Err(invalid("Server ignored a resume range; partial data was preserved.")); }
+        let mut received = 0u64;
+
         // Stream and write chunks
         let mut stream = response.bytes_stream();
         let mut last_db_update = tokio::time::Instant::now();
@@ -293,8 +311,19 @@ impl SegmentWorker {
                 return Err(DlmanError::Paused);
             }
             
-            let chunk = chunk_result?;
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    self.rollback_attempt(&mut file, existing_size).await?;
+                    return Err(DlmanError::Network(error.without_url()));
+                }
+            };
             let chunk_len = chunk.len() as u64;
+            if expected_body.is_some_and(|expected| chunk_len > expected.saturating_sub(received)) {
+                self.rollback_attempt(&mut file, existing_size).await?;
+                return Err(invalid("Server sent more bytes than the requested segment."));
+            }
+            received += chunk_len;
             
             // Apply rate limiting
             self.rate_limiter.acquire(chunk_len).await;
@@ -323,6 +352,11 @@ impl SegmentWorker {
             }
         }
         
+        if expected_body.is_some_and(|expected| received != expected) {
+            self.rollback_attempt(&mut file, existing_size).await?;
+            return Err(invalid("Server truncated the requested segment."));
+        }
+
         // Flush and sync to disk
         file.flush().await?;
         file.sync_all().await?;

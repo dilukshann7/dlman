@@ -198,9 +198,9 @@ impl DownloadTask {
     }
     
     /// Get the effective URL for downloading segments
-    /// Uses final_url (after redirects) if available, otherwise the original url
+    /// Uses the original URL so redirect handling scopes cookies and credentials to the request origin.
     fn effective_url(&self) -> &str {
-        self.download.final_url.as_deref().unwrap_or(&self.download.url)
+        &self.download.url
     }
     
     /// Get the paused flag for external control
@@ -233,6 +233,7 @@ impl DownloadTask {
         }
         
         // Update status to downloading
+        self.download.segment_cache_dir = Some(self.temp_dir.clone());
         self.download.status = DownloadStatus::Downloading;
         self.db.update_download_status(self.download.id, DownloadStatus::Downloading, None).await?;
         self.emit_status_change(DownloadStatus::Downloading, None).await;
@@ -418,7 +419,7 @@ impl DownloadTask {
             self.total_downloaded.clone(),
             self.credentials.clone(),
             self.download.cookies.clone(),
-        );
+        ).with_http_context(self.download.size, self.download.etag.clone(), self.download.source_page_url.clone(), super::refresh::expects_html(&self.download.filename));
         
         // Start progress reporter
         let progress_handle = self.spawn_progress_reporter();
@@ -481,8 +482,8 @@ impl DownloadTask {
             
             let mut join_set = JoinSet::new();
             
-            // Use final_url if available (after redirects), otherwise use original url
-            // This avoids re-resolving redirects for every segment request
+            // Use the original request URL for each segment. Redirect handling
+            // scopes credentials and cookies to that original request origin.
             let url = self.effective_url().to_string();
             
             // Spawn a worker for each segment that needs downloading
@@ -501,7 +502,7 @@ impl DownloadTask {
                     self.total_downloaded.clone(),
                     self.credentials.clone(),
                     self.download.cookies.clone(),
-                );
+                ).with_http_context(self.download.size, self.download.etag.clone(), self.download.source_page_url.clone(), super::refresh::expects_html(&self.download.filename));
                 
                 let segment_index = segment.index;
                 join_set.spawn(async move { 
@@ -699,20 +700,12 @@ impl DownloadTask {
     /// Probe URL to determine if range requests are supported
     /// Uses HEAD first, then falls back to partial GET for size/resumability detection
     async fn probe_url(&mut self) -> Result<bool, DlmanError> {
-        let mut request = self.client.head(&self.download.url);
-        
-        // Apply credentials if available
-        if let Some((ref username, ref password)) = self.credentials {
-            request = request.basic_auth(username, Some(password));
-        }
-        
-        // Apply browser cookies if available (session-based auth)
-        if let Some(ref cookies) = self.download.cookies {
-            request = request.header(reqwest::header::COOKIE, cookies);
-        }
-        
-        let response = request.send().await?;
-        
+        // Apply credentials if available.
+        // Apply browser cookies if available (session-based auth).
+        let response = super::refresh::send_scoped(&self.client, reqwest::Method::HEAD,
+            &self.download.url, self.download.cookies.as_deref(), self.credentials.as_ref(),
+            self.download.source_page_url.as_deref(), None, None).await?;
+
         // Check for authentication required
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -728,6 +721,9 @@ impl DownloadTask {
             });
         }
         
+        if response.status().is_success() { super::refresh::validate_response_for_file(&response, super::refresh::expects_html(&self.download.filename))?; }
+        self.download.etag = response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        self.download.last_modified = response.headers().get(reqwest::header::LAST_MODIFIED).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let mut supports_range = response
             .headers()
             .get(reqwest::header::ACCEPT_RANGES)
@@ -736,7 +732,7 @@ impl DownloadTask {
             .unwrap_or(false);
         
         // Update size if we don't have it
-        if self.download.size.is_none() {
+        if self.download.size.is_none() && response.status().is_success() {
             self.download.size = response
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
@@ -752,22 +748,19 @@ impl DownloadTask {
         
         // If HEAD didn't give us size, try a partial GET request
         // This is critical for GitHub releases and similar CDNs
-        if self.download.size.is_none() {
-            let probe_url = self.download.final_url.as_ref().unwrap_or(&self.download.url);
+        if self.download.size.is_none() || !response.status().is_success() {
+            let probe_url = &self.download.url;
             info!("HEAD didn't return Content-Length, trying partial GET on {}", probe_url);
             
-            let mut range_req = self.client
-                .get(probe_url)
-                .header(reqwest::header::RANGE, "bytes=0-0");
-            
-            // Apply cookies to the fallback probe too
-            if let Some(ref cookies) = self.download.cookies {
-                range_req = range_req.header(reqwest::header::COOKIE, cookies);
-            }
-            
-            match range_req.send().await
-            {
+            // Apply cookies to the fallback probe too, with redirect scoping.
+            match super::refresh::send_scoped(&self.client, reqwest::Method::GET, probe_url,
+                self.download.cookies.as_deref(), self.credentials.as_ref(),
+                self.download.source_page_url.as_deref(), Some("bytes=0-0"), None).await {
                 Ok(range_response) => {
+                    super::refresh::validate_response_for_file(&range_response, super::refresh::expects_html(&self.download.filename))?;
+                    self.download.final_url = Some(range_response.url().to_string());
+                    self.download.etag = range_response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
+                    self.download.last_modified = range_response.headers().get(reqwest::header::LAST_MODIFIED).and_then(|v| v.to_str().ok()).map(str::to_owned);
                     let status = range_response.status();
                     info!("Partial GET status: {}", status);
                     
@@ -809,6 +802,7 @@ impl DownloadTask {
             }
         }
         
+        self.download.supports_range = supports_range;
         Ok(supports_range)
     }
     

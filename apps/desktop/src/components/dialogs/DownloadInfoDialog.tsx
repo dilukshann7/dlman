@@ -44,6 +44,8 @@ import { useTranslation } from 'react-i18next';
 import { formatBytes } from '@/lib/utils';
 import { useQueueStore } from '@/stores/queues';
 import { useCategoryStore } from '@/stores/categories';
+import { useDownloadRefresh } from "@/stores/download-refresh";
+import { canRefreshDownload } from "../../../../../shared/download-refresh.mjs";
 import { useDownloadStore } from '@/stores/downloads';
 import type { Download } from '@/types';
 import { toast } from 'sonner';
@@ -517,6 +519,16 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
               </p>
             )}
           </div>
+
+          {canRefreshDownload(download) && (
+            <Button variant="outline" onClick={() => {
+              onOpenChange(false);
+              void useDownloadRefresh.getState().open(download);
+            }}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              {t('refreshAddress.title')}
+            </Button>
+          )}
 
           {/* URL */}
           <div className="space-y-2">

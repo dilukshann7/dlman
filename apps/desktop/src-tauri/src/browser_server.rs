@@ -217,6 +217,19 @@ async fn handle_show_dialog(
     let state = state.read().await;
     let app_handle = &state.app_handle;
 
+    if let Some(session) = state.core.download_manager.capture_refresh_candidate(
+        req.url.clone(), req.referrer.clone(), req.filename.clone(), req.cookies.clone(),
+    ).await {
+        if app_handle.emit("download-refresh-candidate", &session).is_ok() {
+            request_attention(app_handle);
+            return axum::Json(ShowDialogResponse { success: true, error: None });
+        }
+        // Restore the ordinary dialog if delivery to the refresh UI failed.
+        if let Some(candidate) = session.candidate {
+            let _ = state.core.download_manager.release_refresh_candidate(session.session_id, candidate.candidate_id).await;
+        }
+    }
+
     // Auto-detect HLS/DASH streaming URLs and include media metadata
     // so the frontend dialog routes to start_media_download instead of add_download.
     let url_lower = req.url.split('?').next().unwrap_or(&req.url).to_lowercase();

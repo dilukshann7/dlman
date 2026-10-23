@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import i18n from "@/i18n";
+import { useDownloadRefresh, type RefreshSession } from "@/stores/download-refresh";
 import { useDownloadStore } from "@/stores/downloads";
 import { useQueueStore } from "@/stores/queues";
 import { useUIStore } from "@/stores/ui";
@@ -50,6 +51,13 @@ let pendingDropUrls: string[] = [];
 let pendingClipboardUrls: string[] = [];
 // Store for cookies passed from browser extension
 let pendingCookies: string | undefined = undefined;
+let pendingSourcePage: string | undefined = undefined;
+
+export function getPendingSourcePage(): string | undefined {
+  const source = pendingSourcePage;
+  pendingSourcePage = undefined;
+  return source;
+}
 // Store for media metadata from browser extension (HLS/DASH streaming)
 let pendingMediaMeta: {
   protocol: string;
@@ -68,6 +76,7 @@ export function getPendingDropUrls(): string[] {
 }
 
 export function setPendingDropUrls(urls: string[]) {
+  pendingSourcePage = undefined;
   pendingDropUrls = urls;
 }
 
@@ -78,6 +87,7 @@ export function getPendingClipboardUrls(): string[] {
 }
 
 export function setPendingClipboardUrls(urls: string[]) {
+  pendingSourcePage = undefined;
   pendingClipboardUrls = urls;
 }
 
@@ -123,6 +133,10 @@ export function setupEventListeners(): () => void {
     console.warn("Not running in Tauri context, skipping event listeners");
     return () => {};
   }
+
+  registerListener(listen<RefreshSession>("download-refresh-candidate", event => {
+    if (!isCleanedUp) useDownloadRefresh.getState().offer(event.payload);
+  }));
 
   // Listen for download progress
   registerListener(listen<CoreEvent>("download-progress", (event) => {
@@ -322,11 +336,13 @@ export function setupEventListeners(): () => void {
           // Legacy: plain URL string
           setPendingClipboardUrls([payload]);
           setPendingCookies(undefined);
+          pendingSourcePage = undefined;
           setPendingMediaMeta(undefined);
         } else if (typeof payload === 'object' && payload.url) {
           // Structured payload from browser extension
           setPendingClipboardUrls([payload.url]);
           setPendingCookies(payload.cookies);
+          pendingSourcePage = payload.referrer;
           // Store media metadata if this is an HLS/DASH stream
           if (payload.media_protocol && payload.media_protocol !== 'direct') {
             setPendingMediaMeta({
