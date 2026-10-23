@@ -4,6 +4,10 @@
 Keep it as the source of truth for desktop, mobile, browser extension and website
 branding. Generated SVG files embed this artwork; they are not vector tracings.
 
+The Windows ICO stores its 256×256 image first because Tauri uses the first ICO
+entry for window and tray icons. All smaller sizes remain available for Windows
+to select at native resolution. Keep this ordering when regenerating icons.
+
 To regenerate the committed assets without building an application:
 
 ```powershell

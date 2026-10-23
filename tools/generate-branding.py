@@ -19,6 +19,19 @@ SOURCE = ROOT / "assets/dlman-logo.png"
 ICONS = ROOT / "apps/desktop/src-tauri/icons"
 
 
+def largest_ico_frame_first(data: bytes) -> bytes:
+    """Keep every Windows size while giving Tauri a high-resolution default."""
+    count = int.from_bytes(data[4:6], "little")
+    directory_end = 6 + count * 16
+    entries = [data[offset:offset + 16] for offset in range(6, directory_end, 16)]
+    # Tauri decodes the first directory entry for window/tray icons. Pillow writes
+    # the smallest first, which would stretch 16 px artwork for larger taskbars.
+    entries.sort(key=lambda entry: (entry[0] or 256) * (entry[1] or 256), reverse=True)
+    # Reorder only the fixed-length directory; absolute payload offsets and image
+    # bytes remain unchanged, so Windows can still select each native icon size.
+    return data[:6] + b"".join(entries) + data[directory_end:]
+
+
 def generate() -> dict[Path, bytes]:
     with Image.open(SOURCE) as original:
         source = ImageOps.pad(original.convert("RGBA"), (max(original.size),) * 2,
@@ -65,7 +78,8 @@ def generate() -> dict[Path, bytes]:
     for name, format_name, size in (("icon.ico", "ICO", 256), ("icon.icns", "ICNS", 1024)):
         buffer = BytesIO()
         source.resize((size, size), Image.Resampling.LANCZOS).save(buffer, format=format_name)
-        outputs[ICONS / name] = buffer.getvalue()
+        data = buffer.getvalue()
+        outputs[ICONS / name] = largest_ico_frame_first(data) if format_name == "ICO" else data
 
     def svg(size: int) -> bytes:
         encoded = base64.b64encode(png(size)).decode("ascii")
