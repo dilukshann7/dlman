@@ -72,18 +72,21 @@ upstream releases do not include these changes.
 ## Features
 
 ### ⚡ Speed & Performance
+
 - Multi-segment parallel downloads (1–32 segments per file)
 - Cached CDN URLs to avoid redirect overhead on resume
 - Real-time bandwidth monitoring
 - Per-download and per-queue speed limits
 
 ### 🔄 Reliability
+
 - Pause and resume anytime
 - Auto-resume after crashes or restarts
 - Automatic retry for failed downloads
 - SQLite-backed persistence (no half-broken files)
 
 ### ⏱️ Scheduling & Automation
+
 - Schedule queues to start/stop at specific times
 - Select active days of the week
 - Post-download actions: Sleep, Shutdown, Hibernate
@@ -91,6 +94,7 @@ upstream releases do not include these changes.
 - Queue auto-advance: next downloads start automatically when slots free up
 
 ### 🗂️ Organization
+
 - Queue management with priorities
 - Categories with custom download folders
 - Batch import multiple URLs
@@ -98,6 +102,7 @@ upstream releases do not include these changes.
 - Quick "Clear Filters" button when any filter is active
 
 ### 🔐 Site Logins & Credentials
+
 - Save site login credentials per domain
 - Auto-apply credentials for authenticated downloads (HTTP Basic Auth)
 - Auth detection during URL probe — warning shown before download starts
@@ -105,11 +110,13 @@ upstream releases do not include these changes.
 - Manage saved logins in Settings
 
 ### YouTube Videos and MP3
+
 - Public videos and Shorts with quality selection and merged audio/video
 - MP3 conversion through the existing browser video button and Add Download dialog
 - Bundled extraction tools for all desktop release targets; see [YouTube support](docs/youtube-support.md)
 
 ### 🎨 Interface
+
 - Modern, clean UI
 - Dark and light themes
 - Real-time segment visualization
@@ -118,6 +125,7 @@ upstream releases do not include these changes.
 - In-app update notifications
 
 ### 🧰 Ecosystem
+
 - CLI tool for scripts and automation
 - Browser extensions for Chrome, Firefox, Edge
 - 100% free and open source
@@ -142,12 +150,12 @@ is available only after a corresponding release has been published.
   </a>
 </p>
 
-| Platform | Downloads |
-|----------|-----------|
-| **Windows** | `.msi`, `.exe` |
-| **macOS (Intel)** | `.dmg` (x64) |
-| **macOS (Apple Silicon)** | `.dmg` (aarch64) |
-| **Linux** | `.deb`, `.rpm`, `.AppImage` |
+| Platform                  | Downloads                   |
+| ------------------------- | --------------------------- |
+| **Windows**               | `.msi`, `.exe`              |
+| **macOS (Intel)**         | `.dmg` (x64)                |
+| **macOS (Apple Silicon)** | `.dmg` (aarch64)            |
+| **Linux**                 | `.deb`, `.rpm`, `.AppImage` |
 
 👉 [View all downloads](https://github.com/dilukshann7/dlman/releases/latest)
 
@@ -159,10 +167,10 @@ For platform-specific instructions, see the [Install Guide](docs/INSTALL.md).
 
 Capture downloads directly from your browser.
 
-| Browser | Download |
-|---------|----------|
+| Browser                   | Download                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------- |
 | **Chrome / Edge / Brave** | [📦 Download Extension](https://github.com/dilukshann7/dlman/releases/latest) |
-| **Firefox** | [📦 Download Extension](https://github.com/dilukshann7/dlman/releases/latest) |
+| **Firefox**               | [📦 Download Extension](https://github.com/dilukshann7/dlman/releases/latest) |
 
 Extension files are named `dlman-extension-chrome-vX.Y.Z.zip` and `dlman-extension-firefox-vX.Y.Z.zip`.
 
@@ -193,12 +201,12 @@ See the [CLI documentation](docs/CLI.md) for more.
 
 DLMan is built with modern technologies:
 
-| Component | Technology |
-|-----------|------------|
-| **Backend** | Rust, Tauri v2 |
-| **Frontend** | React, TypeScript, Tailwind CSS |
-| **Database** | SQLite (sqlx) |
-| **Downloads** | tokio, reqwest |
+| Component     | Technology                      |
+| ------------- | ------------------------------- |
+| **Backend**   | Rust, Tauri v2                  |
+| **Frontend**  | React, TypeScript, Tailwind CSS |
+| **Database**  | SQLite (sqlx)                   |
+| **Downloads** | tokio, reqwest                  |
 
 For technical details, see [Architecture](docs/ARCHITECTURE.md) and [Core Engine](docs/CORE.md).
 
@@ -221,55 +229,19 @@ pnpm install
 pnpm dev
 ```
 
----
-
-## Support the original creator
-
-The donation links below support **Novin Code**, the original DLMan creator.
-For this fork, you can [report issues](https://github.com/dilukshann7/dlman/issues),
-contribute changes, or star [the repository](https://github.com/dilukshann7/dlman).
-
-<p align="center">
-  <a href="https://github.com/sponsors/novincode">
-    <img src="https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" alt="GitHub Sponsors">
-  </a>
-  <a href="https://buymeacoffee.com/codeideal">
-    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee">
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/sponsors/novincode">
-    <img src="docs/become-supporter.png" alt="Become a Supporter" width="256">
-  </a>
-</p>
-
-Support the original project financially or share it with others.
-
-- GitHub Sponsors: https://github.com/sponsors/novincode
-- Buy Me a Coffee: https://buymeacoffee.com/codeideal
-
-#### Upstream supporters
-
-| Supporter | How they helped |
-|-----------|-----------------|
-| @tom_doerr | Shared DLMan on X/Twitter: https://x.com/tom_doerr/status/2070526815467143459 |
-
----
-
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Install Guide](docs/INSTALL.md) | Platform-specific installation |
-| [CLI](docs/CLI.md) | Command-line interface |
-| [Architecture](docs/ARCHITECTURE.md) | System design |
-| [Core Engine](docs/CORE.md) | Download engine internals |
-| [Extension](docs/EXTENSION.md) | Browser extension development |
-| [Development](docs/DEVELOPMENT.md) | Setting up for development |
-| [Release](docs/RELEASE.md) | Release process |
+| Document                                   | Description                                                |
+| ------------------------------------------ | ---------------------------------------------------------- |
+| [Install Guide](docs/INSTALL.md)           | Platform-specific installation                             |
+| [CLI](docs/CLI.md)                         | Command-line interface                                     |
+| [Architecture](docs/ARCHITECTURE.md)       | System design                                              |
+| [Core Engine](docs/CORE.md)                | Download engine internals                                  |
+| [Extension](docs/EXTENSION.md)             | Browser extension development                              |
+| [Development](docs/DEVELOPMENT.md)         | Setting up for development                                 |
+| [Release](docs/RELEASE.md)                 | Release process                                            |
 | [YouTube support](docs/youtube-support.md) | Video/MP3 behavior, bundled tools, and verification limits |
-| [Artwork](assets/README.md) | Shared logo source and icon regeneration |
+| [Artwork](assets/README.md)                | Shared logo source and icon regeneration                   |
 
 ---
 
