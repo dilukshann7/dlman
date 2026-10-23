@@ -81,7 +81,7 @@ if (!(window as any)[DLMAN_HOOK_ID]) {
   // =========================================================================
 
   const originalFetch = window.fetch;
-  window.fetch = function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  window.fetch = function (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
     let url: string | undefined;
     try {
       if (typeof input === 'string') {
@@ -129,7 +129,7 @@ if (!(window as any)[DLMAN_HOOK_ID]) {
     return originalOpen.apply(this, [method, url, ...rest] as any);
   };
 
-  XHRProto.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
+  XHRProto.send = function (_body?: Document | XMLHttpRequestBodyInit | null) {
     this.addEventListener('load', function () {
       const url = (this as any).__dlman_url;
       if (!url) return;

@@ -47,9 +47,11 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to get app data directory");
 
+            // Configure media resources before core scheduling begins.
+            let media_tools = app.path().resource_dir().ok().map(|root| root.join("media-tools"));
             // Create state synchronously to ensure it's ready before app starts
             let state = tauri::async_runtime::block_on(async {
-                AppState::new(data_dir).await
+                AppState::new(data_dir, media_tools).await
             });
 
             match state {
@@ -117,6 +119,9 @@ pub fn run() {
             commands::get_downloads,
             commands::probe_links,
             commands::start_media_download,
+            commands::inspect_youtube,
+            commands::get_youtube_inspection,
+            commands::start_youtube_download,
             // Queue commands
             commands::get_queues,
             commands::create_queue,
@@ -150,6 +155,19 @@ pub fn run() {
             commands::open_devtools,
             commands::clear_all_downloads,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(async {
+                        let core = state.core.read().await.clone();
+                        if let Some(core) = core {
+                            let _ = core.pause_all_downloads().await;
+                            core.youtube.shutdown().await;
+                        }
+                    });
+                }
+            }
+        });
 }

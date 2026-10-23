@@ -43,7 +43,7 @@
     "category": "Utility",
     "shortDescription": "Modern Download Manager",
     "longDescription": "A modern, open-source download manager with multi-segment downloads, queue management, and more.",
-    "copyright": "© 2025 DLMan Contributors",
+    "copyright": "\u00a9 2025 DLMan Contributors",
     "macOS": {
       "entitlements": null,
       "exceptionDomain": "",
@@ -55,6 +55,9 @@
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": ""
+    },
+    "resources": {
+      "resources/media-tools/": "media-tools/"
     }
   },
   "plugins": {
@@ -63,7 +66,9 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["dlman"]
+        "schemes": [
+          "dlman"
+        ]
       }
     }
   }

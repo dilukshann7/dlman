@@ -1,3 +1,5 @@
+import { isYoutubeHost } from '../../../../shared/youtube.mjs';
+import { YoutubeController, resolveYoutubeMedia } from '@/lib/youtube';
 import { defineContentScript } from 'wxt/sandbox';
 import { VideoDetector } from '@/lib/video-detector';
 import { VideoOverlayManager } from '@/lib/video-overlay';
@@ -398,15 +400,23 @@ export default defineContentScript({
     // Video Detection & Overlay
     // ========================================================================
 
-    const overlayManager = new VideoOverlayManager((request: MediaDownloadRequest) => {
-      browser.runtime.sendMessage({
+    const overlayManager = new VideoOverlayManager(async (request: MediaDownloadRequest) => {
+      if (request.media.protocol === 'youtube') {
+        const resolved = await resolveYoutubeMedia(request.media);
+        const selected = request.youtube_selection;
+        if (!selected || !resolved.variants.some((v) => JSON.stringify(v.youtube_selection) === JSON.stringify(selected))) {
+          throw new Error('Selected quality is unavailable. Refresh the quality list.');
+        }
+        request = { ...request, media: resolved, inspection_id: resolved.inspection_id };
+      }
+      const result = await browser.runtime.sendMessage({
         type: 'media-download',
         request,
-      }).catch((err) => {
-        console.error('[DLMan] Failed to send media download request:', err);
-      });
+      }) as { success?: boolean; error?: string };
+      if (!result?.success) throw new Error(result?.error || 'Download was not accepted.');
       showDlmanToast(1);
-    });
+    }, resolveYoutubeMedia);
+    const youtubeController = new YoutubeController(overlayManager);
 
     const detector = new VideoDetector({
       onDetected: async (media: DetectedMedia) => {
@@ -437,7 +447,7 @@ export default defineContentScript({
       observeDOM: true,
     });
 
-    detector.start();
+    if (!isYoutubeHost(location.href)) detector.start();
 
     // ========================================================================
     // MAIN-world media hook listener
@@ -450,7 +460,7 @@ export default defineContentScript({
 
     window.addEventListener('message', (event) => {
       if (event.source !== window) return;
-      if (!event.data || event.data.source !== 'dlman-media-hook') return;
+      if (isYoutubeHost(location.href) || !event.data || event.data.source !== 'dlman-media-hook') return;
 
       const { type: msgType, url, protocol } = event.data;
 
@@ -473,11 +483,17 @@ export default defineContentScript({
     browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
       const msg = message as { type: string; url?: string; protocol?: string; x?: number; y?: number };
 
-      if (msg.type === 'stream-detected' && msg.url) {
+      if (msg.type === 'stream-detected' && msg.url && !isYoutubeHost(location.href)) {
         // Background's webRequest detected a stream URL — inject it into the detector
         // Pass protocol hint if background already classified it
         detector.injectStreamUrl(msg.url, msg.protocol as any);
         sendResponse({ ok: true });
+        return true;
+      }
+
+      if (msg.type === 'get-video-at-point' && isYoutubeHost(location.href)) {
+        youtubeController.request().then((request) => sendResponse({ request }))
+          .catch((error) => sendResponse({ request: null, error: String(error) }));
         return true;
       }
 
@@ -501,7 +517,7 @@ export default defineContentScript({
         return true;
       }
 
-      return false; // Not handled here — let other listeners handle
+      return true; // Keep the channel available for the other message listeners.
     });
 
     // Store last right-click position for context menu video lookup
@@ -514,6 +530,7 @@ export default defineContentScript({
 
     // Clean up on page unload
     window.addEventListener('beforeunload', () => {
+      youtubeController.destroy();
       detector.destroy();
       overlayManager.destroy();
     });

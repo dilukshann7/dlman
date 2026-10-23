@@ -1,3 +1,4 @@
+import type { YoutubeSelection } from "../../../../shared/youtube.mjs";
 /**
  * Media detection types — mirrors dlman-types Rust structs.
  *
@@ -12,10 +13,11 @@
 // ============================================================================
 
 /** Protocol used to deliver the media stream */
-export type MediaProtocol = 'direct' | 'hls' | 'dash';
+export type MediaProtocol = 'direct' | 'hls' | 'dash' | 'youtube';
 
 /** A single quality/variant of a detected media stream */
 export interface MediaVariant {
+  youtube_selection?: YoutubeSelection;
   /** URL of this variant's manifest or direct file */
   url: string;
   /** Human-readable label (e.g. "1080p", "720p") */
@@ -40,6 +42,7 @@ export interface MediaVariant {
 
 /** A media stream detected on a webpage */
 export interface DetectedMedia {
+  inspection_id?: string;
   /** Unique ID for this detection */
   id: string;
   /** Page URL where the media was found */
@@ -74,6 +77,8 @@ export interface DetectedMedia {
 
 /** Request from extension to download a media stream */
 export interface MediaDownloadRequest {
+  inspection_id?: string;
+  youtube_selection?: YoutubeSelection;
   media: DetectedMedia;
   /** Index of chosen variant (undefined = best quality) */
   variant_index?: number;

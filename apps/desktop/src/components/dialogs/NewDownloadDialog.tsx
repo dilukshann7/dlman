@@ -1,3 +1,5 @@
+import { useYoutubeInspection } from '@/hooks/useYoutubeInspection';
+import { isYoutubeHost, type YoutubeSelection } from '../../../../../shared/youtube.mjs';
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -88,7 +90,7 @@ export function NewDownloadDialog() {
   const [isProbing, setIsProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [requiresAuth, setRequiresAuth] = useState(false);
-  const [isAdding] = useState(false); // Kept for button disabled state during brief window
+  const [isAdding, setIsAdding] = useState(false); // Kept for button disabled state during brief window
   const [rememberPathForCategory, setRememberPathForCategory] = useState(false);
   const [pathCustomized, setPathCustomized] = useState(false);
   // Track if user has manually customized the path (ref for logic, state for UI reactivity)
@@ -103,8 +105,12 @@ export function NewDownloadDialog() {
     master_url: string;
     page_title?: string;
     variant_index?: number;
+    youtube_selection?: YoutubeSelection;
     referrer?: string;
   } | undefined>(undefined);
+
+  const youtube = useYoutubeInspection(url, showNewDownloadDialog, mediaMeta?.youtube_selection);
+  const youtubeUnavailable = youtube.enabled && (youtube.loading || !!youtube.error || !youtube.selection);
 
   // Tracks which intake we've already processed. Keyed on the intake nonce so
   // the effect runs once per open AND once per new drop/paste while open, but
@@ -218,6 +224,8 @@ export function NewDownloadDialog() {
       return;
     }
 
+    if (isYoutubeHost(url)) { setIsProbing(false); setRequiresAuth(false); setProbeError(null); return; }
+
     if (!url) {
       setFilename('');
       setFileSize(null);
@@ -293,6 +301,7 @@ export function NewDownloadDialog() {
     try {
       const text = await navigator.clipboard.readText();
       if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
+        setMediaMeta(undefined); setBrowserCookies(undefined);
         setUrl(text);
       }
     } catch (err) {
@@ -327,10 +336,29 @@ export function NewDownloadDialog() {
     }
   }, [destination, t]);
 
+  useEffect(() => {
+    if (!youtube.preview || !youtube.selection) return;
+    const extension = youtube.selection.container;
+    const title = youtube.preview.title.replace(/[\/\\:*?"<>|]/g, '_').trim().slice(0, 160) || 'YouTube video';
+    const name = `${title}.${extension}`;
+    setFilename(name);
+    setFileSize(youtube.preview.variants.find((v) => v.id === youtube.selection?.format_id && v.output_mode === youtube.selection?.output_mode)?.size ?? null);
+    if (!filenameEdited) setCustomFilename(name);
+    updateCategoryFromFilename(name);
+  }, [youtube.preview, youtube.selection, filenameEdited, updateCategoryFromFilename]);
+
   const handleAddDownload = useCallback(async (startLater: boolean = false) => {
-    if (!url || !destination) {
+    if (!url || !destination || youtubeUnavailable) {
       toast.error(t('toasts.enterUrlAndDest'));
       return;
+    }
+
+    let refreshedInspectionId = youtube.inspectionId;
+    if (youtube.enabled) {
+      setIsAdding(true);
+      try { refreshedInspectionId = await youtube.refreshSelection(); }
+      catch (error) { toast.error(error instanceof Error ? error.message : String(error)); return; }
+      finally { setIsAdding(false); }
     }
 
     // Get the filename to use (custom if edited, otherwise probed)
@@ -392,7 +420,13 @@ export function NewDownloadDialog() {
     // We just need to swap our temp ID for the real one
     if (isTauri()) {
       try {
-        if (mediaMeta && (mediaMeta.protocol === 'hls' || mediaMeta.protocol === 'dash')) {
+        if (youtube.enabled && youtube.selection && youtube.inspectionId) {
+          await invoke<DownloadType>('start_youtube_download', {
+            url, inspection_id: refreshedInspectionId, selection: youtube.selection,
+            destination, queue_id: queueId, category_id: categoryId || null,
+            filename: filenameToUse || null, start_later: startLater,
+          });
+        } else if (mediaMeta && (mediaMeta.protocol === 'hls' || mediaMeta.protocol === 'dash')) {
           // HLS/DASH streaming — call the dedicated media download command
           await invoke<DownloadType>('start_media_download', {
             master_url: mediaMeta.master_url,
@@ -437,7 +471,7 @@ export function NewDownloadDialog() {
         toast.error(t('toasts.addDownloadFailed'), { description: errorMsg });
       }
     }
-  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, mediaMeta, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
+  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, mediaMeta, youtube, youtubeUnavailable, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
 
   const formatFileSize = (bytes: number) => {
     if (bytes >= 1024 * 1024 * 1024) {
@@ -480,7 +514,7 @@ export function NewDownloadDialog() {
                 <Input
                   id="url"
                   value={url}
-                  onChange={(e) => setUrl(e.target.value)}
+                  onChange={(e) => { setMediaMeta(undefined); setBrowserCookies(undefined); setUrl(e.target.value); }}
                   placeholder={t('newDownload.urlPlaceholder')}
                   className="h-11 pr-10"
                 />
@@ -667,6 +701,20 @@ export function NewDownloadDialog() {
             )}
           </AnimatePresence>
 
+          {youtube.enabled && (
+            <div className="space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">{t('youtube.quality', 'Quality')}</Label>
+              {youtube.loading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{t('youtube.loading', 'Loading video formats…')}</div>
+                : youtube.error ? <div className="space-y-2"><p className="text-sm text-destructive" role="alert">{youtube.error}</p><Button size="sm" variant="outline" onClick={youtube.retry}>{t('youtube.retry', 'Retry')}</Button></div>
+                : <Select value={youtube.selection ? `${youtube.selection.output_mode}:${youtube.selection.format_id}` : ''} onValueChange={youtube.choose}>
+                    <SelectTrigger><SelectValue placeholder={t('youtube.select', 'Select quality')} /></SelectTrigger>
+                    <SelectContent>{youtube.preview?.variants.map((variant) => <SelectItem key={`${variant.output_mode}:${variant.id}`} value={`${variant.output_mode}:${variant.id}`}>
+                      {variant.output_mode === 'mp3' ? variant.quality : `${variant.quality} · ${variant.container.toUpperCase()}`}
+                    </SelectItem>)}</SelectContent>
+                  </Select>}
+            </div>
+          )}
+
           {/* Destination */}
           <div className="space-y-2">
             <Label htmlFor="destination" className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
@@ -783,7 +831,7 @@ export function NewDownloadDialog() {
           <Button
             variant="outline"
             onClick={() => handleAddDownload(true)}
-            disabled={!url || !destination || isAdding}
+            disabled={!url || !destination || isAdding || youtubeUnavailable}
             title={t('newDownload.downloadLaterTitle')}
           >
             <Clock className="mr-2 h-4 w-4" />
@@ -791,7 +839,7 @@ export function NewDownloadDialog() {
           </Button>
           <Button
             onClick={() => handleAddDownload(false)}
-            disabled={!url || !destination || isAdding}
+            disabled={!url || !destination || isAdding || youtubeUnavailable}
           >
             {isAdding ? (
               <>

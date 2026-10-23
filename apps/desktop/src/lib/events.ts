@@ -1,3 +1,4 @@
+import { createYoutubeDialogQueue, type YoutubeSelection } from "../../../../shared/youtube.mjs";
 // Tauri event listener setup
 
 import { listen } from "@tauri-apps/api/event";
@@ -54,6 +55,8 @@ let pendingMediaMeta: {
   master_url: string;
   page_title?: string;
   variant_index?: number;
+  youtube_selection?: YoutubeSelection;
+  inspection_id?: string;
   referrer?: string;
 } | undefined = undefined;
 
@@ -309,12 +312,9 @@ export function setupEventListeners(): () => void {
   // Listen for show-new-download-dialog event (from deep links / extension)
   // Payload can be a plain URL string (legacy) or structured object with url, referrer, filename, cookies
   // For HLS/DASH media, also includes media_protocol, media_master_url, etc.
-  registerListener(listen<string | { url: string; referrer?: string; filename?: string; cookies?: string; media_protocol?: string; media_master_url?: string; media_page_title?: string; variant_index?: number } | null>(
-    "show-new-download-dialog",
-    (event) => {
-      if (isCleanedUp) return;
-      const payload = event.payload;
-      
+  type DownloadDialogPayload = string | { url: string; referrer?: string; filename?: string; cookies?: string; media_protocol?: string; media_master_url?: string; media_page_title?: string; variant_index?: number; youtube_selection?: YoutubeSelection; inspection_id?: string } | null;
+  const presentDownloadDialog = (payload: DownloadDialogPayload) => {
+    if (isCleanedUp) return;
       // Parse payload - can be string (URL) or structured object
       if (payload) {
         if (typeof payload === 'string') {
@@ -333,6 +333,8 @@ export function setupEventListeners(): () => void {
               master_url: payload.media_master_url || payload.url,
               page_title: payload.media_page_title,
               variant_index: payload.variant_index,
+              youtube_selection: payload.youtube_selection,
+              inspection_id: payload.inspection_id,
               referrer: payload.referrer,
             });
           } else {
@@ -343,8 +345,19 @@ export function setupEventListeners(): () => void {
       
       // Open (or re-fill, if already open) the new download dialog.
       useUIStore.getState().routeUrlIntake(1);
-    }
-  ));
+  };
+  const youtubeDialogs = createYoutubeDialogQueue<DownloadDialogPayload>(presentDownloadDialog,
+    () => useUIStore.getState().showNewDownloadDialog);
+  unlisten.push(() => youtubeDialogs.destroy());
+  unlisten.push(useUIStore.subscribe((state, previous) => {
+    if (previous.showNewDownloadDialog && !state.showNewDownloadDialog) youtubeDialogs.closed();
+  }));
+  registerListener(listen<DownloadDialogPayload>("show-new-download-dialog", (event) => {
+    if (isCleanedUp) return;
+    const payload = event.payload;
+    if (payload && typeof payload === 'object' && payload.media_protocol === 'youtube') youtubeDialogs.offer(payload);
+    else presentDownloadDialog(payload);
+  }));
 
   // Listen for show-batch-download-dialog event (from extension bulk download)
   registerListener(listen<string[]>(

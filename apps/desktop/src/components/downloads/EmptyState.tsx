@@ -50,7 +50,7 @@ export function EmptyState({ hasAnyDownloads }: EmptyStateProps) {
         >
           {/* Main icon container */}
           <div className="w-28 h-28 rounded-full bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center shadow-inner">
-            <Download className="h-14 w-14 text-primary" />
+            <img src="/logo.png" alt="DLMan" className="h-20 w-20 object-contain" />
           </div>
           {/* Decorative badge - Link icon */}
           <motion.div

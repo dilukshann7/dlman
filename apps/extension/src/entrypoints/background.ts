@@ -1,3 +1,4 @@
+import { canonicalYoutubeUrl, isYoutubeHost } from '../../../../shared/youtube.mjs';
 import { defineBackground } from 'wxt/sandbox';
 import { getDlmanClient, resetDlmanClient } from '@/lib/api-client';
 import type { WsEvent } from '@/lib/api-client';
@@ -217,6 +218,11 @@ export default defineBackground(() => {
         break;
 
       case 'download-video-dlman':
+        if (tab?.url && isYoutubeHost(tab.url)) {
+          const canonical = canonicalYoutubeUrl(tab.url);
+          if (canonical) await handleDownload(canonical);
+          return;
+        }
         // Ask content script for the detected video near the click point
         if (tab?.id) {
           try {
@@ -634,7 +640,7 @@ export default defineBackground(() => {
     }
 
     // Read browser cookies for this domain — enables session-authenticated downloads
-    const cookies = await getCookiesForUrl(url);
+    const cookies = isYoutubeHost(url) ? undefined : await getCookiesForUrl(url);
 
     // Auto-detect HLS/DASH streaming URLs and route through the media pipeline
     // so the desktop app receives full media context (protocol, page title, etc.)
@@ -768,6 +774,7 @@ export default defineBackground(() => {
     referrer?: string;
     links?: string[];
     media?: DetectedMedia;
+    inspection_id?: string;
     request?: MediaDownloadRequest;
   }
 
@@ -864,6 +871,21 @@ export default defineBackground(() => {
         } else {
           sendResponse({ ok: true });
         }
+        return true;
+
+      case 'youtube-inspect':
+      case 'youtube-inspection':
+        (async () => {
+          try {
+            const client = getDlmanClient();
+            const result = msg.type === 'youtube-inspect'
+              ? await client.inspectYoutube(msg.url || '')
+              : await client.youtubeInspection(msg.inspection_id || '');
+            sendResponse(result);
+          } catch (error) {
+            sendResponse({ status: 'failed', error: error instanceof Error ? error.message : 'DLMan is unavailable.' });
+          }
+        })();
         return true;
 
       case 'media-detected':

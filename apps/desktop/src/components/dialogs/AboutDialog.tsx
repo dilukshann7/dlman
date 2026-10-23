@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, Github, Heart, Coffee, RefreshCw, ExternalLink, Sparkles } from 'lucide-react';
+import { Github, Heart, Coffee, RefreshCw, ExternalLink, Sparkles } from 'lucide-react';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 
@@ -54,7 +54,7 @@ export function AboutDialog() {
         <DialogHeader className="text-center">
           <div className="flex justify-center mb-4">
             <div className="rounded-full bg-primary/10 p-4">
-              <Download className="h-12 w-12 text-primary" />
+              <img src="/logo.png" alt="DLMan" className="h-12 w-12 object-contain" />
             </div>
           </div>
           <DialogTitle className="text-2xl text-center">DLMan</DialogTitle>

@@ -1172,11 +1172,13 @@ dependencies = [
  "fs2",
  "futures",
  "governor",
+ "libc",
  "parking_lot",
  "quick-xml 0.36.2",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
@@ -1187,6 +1189,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
