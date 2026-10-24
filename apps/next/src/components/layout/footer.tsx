@@ -71,7 +71,7 @@ export function Footer() {
             <h4 className="font-semibold text-sm mb-3">Community</h4>
             <ul className="space-y-2">
               {footerLinks.community.map((link) => (
-                <li key={link.href}>
+                <li key={link.label}>
                   <Link
                     href={link.href}
                     target={link.href.startsWith("http") ? "_blank" : undefined}

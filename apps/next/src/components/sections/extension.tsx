@@ -36,7 +36,7 @@ export function ExtensionSection() {
             <div className="mt-4 text-center">
               <Link href={siteConfig.firefox} target="_blank" rel="noopener">
                 <Button variant="link" size="sm" className="text-xs text-muted-foreground gap-1">
-                  Firefox Add-on Store
+                  Firefox Extension Releases
                   <IconArrowRight className="h-3 w-3" />
                 </Button>
               </Link>

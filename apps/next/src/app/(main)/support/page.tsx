@@ -23,7 +23,7 @@ const supportOptions = [
   {
     icon: IconBrandGithub,
     title: "GitHub Sponsors",
-    description: "Monthly or one-time sponsorship through GitHub.",
+    description: "For now, visit our GitHub repository to support DLMan.",
     href: siteConfig.support.githubSponsor,
     cta: "Sponsor on GitHub",
     external: true,
@@ -56,7 +56,7 @@ const supportOptions = [
     icon: IconGitPullRequest,
     title: "Contribute",
     description: "Fix a bug, add a feature, or improve the docs.",
-    href: "https://github.com/novincode/dlman/blob/main/CONTRIBUTING.md",
+    href: "https://github.com/dilukshann7/dlman/blob/main/CONTRIBUTING.md",
     cta: "Contributing Guide",
     external: true,
   },

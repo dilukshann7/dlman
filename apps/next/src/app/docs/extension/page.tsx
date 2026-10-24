@@ -169,11 +169,13 @@ export default function ExtensionDocsPage() {
 
       <h3>Firefox</h3>
       <p>
-        Install directly from the{" "}
+        Download the Firefox extension from{" "}
         <Link href={siteConfig.firefox} target="_blank" rel="noopener" className="text-primary hover:underline font-medium">
-          Firefox Add-ons Store
+          GitHub Releases
         </Link>.
-        No developer mode needed.
+        Extract the ZIP, open <code>about:debugging#/runtime/this-firefox</code>,
+        click <strong>Load Temporary Add-on</strong>, and select <code>manifest.json</code>.
+        Firefox removes temporary add-ons when it closes.
       </p>
 
       {/* How It Works */}

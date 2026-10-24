@@ -35,7 +35,7 @@ export function DocsPreviewSection() {
             </Card>
           </Link>
 
-          <Link href={`https://github.com/novincode/dlman/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener">
+          <Link href={`https://github.com/dilukshann7/dlman/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener">
             <Card className="group hover:border-primary/30 transition-colors h-full">
               <CardContent className="flex flex-col items-center gap-3 p-6">
                 <IconBrandGithub className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors" />

@@ -26,7 +26,7 @@ export function SupportCta() {
                   Support the project
                 </Button>
               </Link>
-              <Link href="https://github.com/novincode/dlman" target="_blank" rel="noopener">
+              <Link href="https://github.com/dilukshann7/dlman" target="_blank" rel="noopener">
                 <Button variant="outline" className="gap-1.5">
                   Star on GitHub
                   <IconArrowRight className="h-3.5 w-3.5" />

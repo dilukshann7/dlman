@@ -240,7 +240,7 @@ export function DownloadSection({ release, forOS, compact = false }: DownloadSec
                           <a href={ext.storeUrl} target="_blank" rel="noopener">
                             <Button size="sm" variant="outline" className="text-xs gap-1 h-8">
                               <IconExternalLink className="h-3 w-3" />
-                              Store
+                              Releases
                             </Button>
                           </a>
                         )}

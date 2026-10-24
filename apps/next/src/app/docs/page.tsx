@@ -26,7 +26,7 @@ export default function DocsGettingStarted() {
       <p>
         Download the latest release for your operating system from the{" "}
         <Link href="/download" className="text-primary hover:underline">download page</Link> or{" "}
-        <Link href="https://github.com/novincode/dlman/releases/latest" target="_blank" rel="noopener" className="text-primary hover:underline">
+        <Link href="https://github.com/dilukshann7/dlman/releases/latest" target="_blank" rel="noopener" className="text-primary hover:underline">
           GitHub Releases
         </Link>.
       </p>
@@ -41,14 +41,14 @@ export default function DocsGettingStarted() {
       <ul>
         <li>
           <strong>Chrome/Edge/Brave:</strong> Download the chrome extension zip from{" "}
-          <Link href="https://github.com/novincode/dlman/releases/latest" target="_blank" rel="noopener" className="text-primary hover:underline">
+          <Link href="https://github.com/dilukshann7/dlman/releases/latest" target="_blank" rel="noopener" className="text-primary hover:underline">
             releases
           </Link>, extract it, go to <code>chrome://extensions</code>, enable Developer Mode, and load unpacked.
         </li>
         <li>
           <strong>Firefox:</strong>{" "}
-          <Link href="https://addons.mozilla.org/en-US/firefox/addon/dlman/" target="_blank" rel="noopener" className="text-primary hover:underline">
-            Install from Firefox Add-ons
+          <Link href="https://github.com/dilukshann7/dlman/releases/latest" target="_blank" rel="noopener" className="text-primary hover:underline">
+            Download from GitHub Releases
           </Link>
         </li>
       </ul>
