@@ -77,7 +77,7 @@ Two workflows trigger automatically:
 
 ### Step 4: Verify
 
-1. Go to [GitHub Releases](https://github.com/novincode/dlman/releases)
+1. Go to [GitHub Releases](https://github.com/dilukshann7/dlman/releases)
 2. Check that the latest release has:
    - Desktop app binaries for all platforms
    - Browser extension ZIPs
@@ -143,7 +143,7 @@ The extension ZIPs are automatically created in `.github/workflows/build-extensi
 ### Release created but no artifacts uploaded
 
 Check the workflow logs:
-1. Go to [Actions](https://github.com/novincode/dlman/actions)
+1. Go to [Actions](https://github.com/dilukshann7/dlman/actions)
 2. Find the failed workflow
 3. Check the step logs for errors
 

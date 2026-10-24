@@ -6,7 +6,7 @@ Thank you for your interest in contributing to DLMan! We welcome contributions o
 
 ```bash
 # Clone the repository
-git clone https://github.com/novincode/dlman.git
+git clone https://github.com/dilukshann7/dlman.git
 cd dlman
 
 # Install dependencies
@@ -167,8 +167,8 @@ We're open to feature ideas! When suggesting features:
 
 ## ❓ Questions?
 
-- Open a [GitHub Discussion](https://github.com/novincode/dlman/discussions)
-- Check existing [issues](https://github.com/novincode/dlman/issues)
+- Open a [GitHub Discussion](https://github.com/dilukshann7/dlman/discussions)
+- Check existing [issues](https://github.com/dilukshann7/dlman/issues)
 
 ---
 

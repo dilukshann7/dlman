@@ -545,7 +545,7 @@ mod tests {
     fn content_disposition_beats_the_url_path() {
         // The exact bug: the URL segment is `main`, the server says otherwise.
         let resolved = resolve_filename(
-            &parse_url("https://codeload.github.com/novincode/dlman/zip/refs/heads/main"),
+            &parse_url("https://codeload.github.com/dilukshann7/dlman/zip/refs/heads/main"),
             Some("attachment; filename=dlman-main.zip"),
             Some("application/zip"),
         );

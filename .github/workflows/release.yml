@@ -75,7 +75,7 @@ jobs:
           
           # If no changelog found, use default message
           if [ -z "$CHANGELOG" ]; then
-            CHANGELOG="See [CHANGELOG.md](https://github.com/novincode/dlman/blob/main/CHANGELOG.md) for details."
+            CHANGELOG="See [CHANGELOG.md](https://github.com/dilukshann7/dlman/blob/main/CHANGELOG.md) for details."
           fi
           
           # Write to file with download instructions + changelog
@@ -254,7 +254,7 @@ jobs:
           # gh-releases-zsync|<user>|<repo>|<release>|<asset-glob>
           # `latest` makes AppImageUpdate always pull the newest release; the glob
           # must match the .zsync asset name (version-independent, amd64 build).
-          UPDATE_INFO="gh-releases-zsync|novincode|dlman|latest|DLMan_*_amd64.AppImage.zsync"
+          UPDATE_INFO="gh-releases-zsync|dilukshann7|dlman|latest|DLMan_*_amd64.AppImage.zsync"
 
           # The AppImage type-2 runtime reserves a zeroed `.upd_info` ELF section
           # exactly so update information can be embedded after the fact.
@@ -280,7 +280,7 @@ jobs:
 
           # Replace the release assets with the update-info-enabled versions.
           gh release upload "${TAG}" "${APPIMAGE}" "${NAME}.zsync" \
-            --repo novincode/dlman --clobber
+            --repo dilukshann7/dlman --clobber
 
   build-extension:
     needs: create-release

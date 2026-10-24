@@ -12,7 +12,7 @@ version = "1.11.1"
 edition = "2021"
 authors = ["DLMan Contributors"]
 license = "MIT"
-repository = "https://github.com/novincode/dlman"
+repository = "https://github.com/dilukshann7/dlman"
 
 [workspace.dependencies]
 # Async runtime

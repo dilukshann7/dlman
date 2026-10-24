@@ -9,7 +9,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/novincode/dlman.git
+git clone https://github.com/dilukshann7/dlman.git
 cd dlman
 pnpm install
 ```

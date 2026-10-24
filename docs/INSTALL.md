@@ -1,6 +1,6 @@
 # Installation
 
-Download from [Releases](https://github.com/novincode/dlman/releases).
+Download from [Releases](https://github.com/dilukshann7/dlman/releases).
 
 ## Windows
 
