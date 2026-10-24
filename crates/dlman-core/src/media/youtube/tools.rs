@@ -236,6 +236,62 @@ pub(super) async fn capture(
 mod tests {
     use super::*;
 
+    fn test_tools() -> MediaTools {
+        MediaTools {
+            root: PathBuf::from("media-tools"),
+            yt_dlp: PathBuf::from("media-tools/yt-dlp"),
+            ffprobe: PathBuf::from("media-tools/ffprobe"),
+            deno: PathBuf::from("media-tools/deno"),
+        }
+    }
+
+    #[test]
+    fn default_and_legacy_proxy_settings_allow_video_inspection() {
+        let tools = test_tools();
+        for proxy in [
+            ProxySettings::default(),
+            serde_json::from_value(serde_json::json!({ "mode": "" })).unwrap(),
+        ] {
+            let args = tools.args(&proxy).unwrap();
+            assert!(!args.iter().any(|arg| arg == "--proxy"));
+        }
+    }
+
+    #[test]
+    fn explicit_proxy_modes_keep_their_video_tool_behavior() {
+        let tools = test_tools();
+        let direct = ProxySettings {
+            mode: "none".into(),
+            ..Default::default()
+        };
+        assert!(tools
+            .args(&direct)
+            .unwrap()
+            .windows(2)
+            .any(|args| args == ["--proxy", ""]));
+
+        let manual = ProxySettings {
+            mode: "manual".into(),
+            https_proxy: Some("http://proxy.example:8080".into()),
+            ..Default::default()
+        };
+        assert!(tools
+            .args(&manual)
+            .unwrap()
+            .windows(2)
+            .any(|args| args == ["--proxy", "http://proxy.example:8080/"]));
+
+        let invalid = ProxySettings {
+            mode: "unsupported".into(),
+            ..Default::default()
+        };
+        assert!(tools
+            .args(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported proxy mode."));
+    }
+
     #[test]
     fn identifies_bot_checks_without_exposing_raw_diagnostics() {
         for diagnostic in [

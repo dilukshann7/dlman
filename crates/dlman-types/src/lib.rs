@@ -348,10 +348,10 @@ fn default_language() -> String {
 }
 
 /// Proxy configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxySettings {
     /// Proxy mode: "none", "system", or "manual"
-    #[serde(default = "default_proxy_mode")]
+    #[serde(default = "default_proxy_mode", deserialize_with = "deserialize_proxy_mode")]
     pub mode: String,
     /// HTTP proxy URL (for manual mode)
     pub http_proxy: Option<String>,
@@ -367,6 +367,29 @@ pub struct ProxySettings {
 
 fn default_proxy_mode() -> String {
     "system".to_string()
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            mode: default_proxy_mode(),
+            http_proxy: None,
+            https_proxy: None,
+            no_proxy: None,
+            username: None,
+            password: None,
+        }
+    }
+}
+
+fn deserialize_proxy_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mode = String::deserialize(deserializer)?;
+    // Older releases derived Default, which persisted an empty String for the mode.
+    // Treat only that legacy value as system mode; explicit choices remain unchanged.
+    Ok(if mode.is_empty() { default_proxy_mode() } else { mode })
 }
 
 /// Where in-progress segment/scratch files are written while a download runs.
