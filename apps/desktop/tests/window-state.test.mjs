@@ -19,10 +19,12 @@ function nativeWindow() {
   const state = {
     width: 1200, height: 800, scale: 1,
     minimized: false, maximized: false, fullscreen: false,
+    visible: false,
   };
   return {
     state,
     restored: [],
+    shown: [],
     centered: false,
     innerSize: async () => ({ width: state.width, height: state.height }),
     scaleFactor: async () => state.scale,
@@ -36,6 +38,10 @@ function nativeWindow() {
     },
     async maximize() { state.maximized = true; },
     async center() { this.centered = true; },
+    async show() {
+      state.visible = true;
+      this.shown.push({ width: state.width, height: state.height, maximized: state.maximized });
+    },
     async onResized(handler) {
       resized = handler;
       return () => { resized = undefined; };
@@ -46,6 +52,33 @@ function nativeWindow() {
     },
   };
 }
+
+test('startup reveals only the restored size, after restoring maximized state', async () => {
+  const storage = storageWith(JSON.stringify({ width: 1040, height: 720, maximized: true }));
+  const window = nativeWindow();
+  const resize = window.setSize;
+  window.setSize = async function (size) {
+    assert.equal(this.state.visible, false, 'restoring size must happen before the window is shown');
+    return resize.call(this, size);
+  };
+  await rememberWindowState(window, storage);
+  assert.deepEqual(window.shown, [{ width: 1040, height: 720, maximized: true }]);
+});
+
+test('first launch reveals the native default size without a resize', async () => {
+  const window = nativeWindow();
+  window.state.height = 720;
+  await rememberWindowState(window, storageWith());
+  assert.deepEqual(window.restored, []);
+  assert.deepEqual(window.shown, [{ width: 1200, height: 720, maximized: false }]);
+});
+
+test('a failed resize subscription still reveals the window', async () => {
+  const window = nativeWindow();
+  window.onResized = async () => { throw new Error('subscription unavailable'); };
+  await assert.rejects(rememberWindowState(window, storageWith()), /subscription unavailable/);
+  assert.equal(window.state.visible, true);
+});
 
 test('reopening restores the last resized client size', async () => {
   const storage = storageWith();

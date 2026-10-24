@@ -10,7 +10,7 @@ interface WindowState {
 
 type ManagedWindow = Pick<Window,
   'innerSize' | 'scaleFactor' | 'isMinimized' | 'isMaximized' | 'isFullscreen' |
-  'setSize' | 'maximize' | 'center' | 'onResized'>;
+  'setSize' | 'maximize' | 'center' | 'onResized' | 'show'>;
 type StateStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 function validSize(width: unknown, height: unknown): width is number {
@@ -31,7 +31,7 @@ function readState(storage: StateStorage): WindowState | undefined {
   }
 }
 
-/** Persist normal client dimensions in logical pixels across app launches. */
+/** Restore before showing the window, then persist normal client dimensions in logical pixels. */
 export async function rememberWindowState(
   appWindow: ManagedWindow = getCurrentWindow(),
   storage: StateStorage = localStorage,
@@ -75,11 +75,17 @@ export async function rememberWindowState(
     }
   };
 
-  const unlisten = await appWindow.onResized(saveState);
-  await saveState();
-  return () => {
-    disposed = true;
-    revision++;
-    unlisten();
-  };
+  try {
+    const unlisten = await appWindow.onResized(saveState);
+    await saveState();
+    return () => {
+      disposed = true;
+      revision++;
+      unlisten();
+    };
+  } finally {
+    // The native window starts hidden so its initial frame already has the restored size.
+    // A listener/storage failure must still leave the application accessible.
+    await appWindow.show();
+  }
 }
