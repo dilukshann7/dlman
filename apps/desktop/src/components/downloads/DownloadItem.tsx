@@ -74,6 +74,7 @@ interface DownloadItemProps {
 export function DownloadItem({ download, isFocused = false }: DownloadItemProps) {
   const { t } = useTranslation();
   const { selectedIds, toggleSelected, removeDownload, updateStatus, updateDownload, moveToQueue, setFocusedId } = useDownloadStore();
+  const orderedSegments = [...download.segments].sort((a, b) => a.start - b.start);
   const isSelected = selectedIds.has(download.id);
   const isSelectionMode = selectedIds.size > 0; // Selection mode is active when any items are selected
   const queue = useQueueStore((s) => s.queues.get(download.queue_id));
@@ -706,7 +707,7 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
                         <div className="space-y-2">
                           {/* IDM-style single progress bar with segments */}
                           <div className="relative h-3 bg-muted rounded-full overflow-hidden">
-                            {download.segments.map((segment, idx) => {
+                            {orderedSegments.map((segment, idx) => {
                               // Handle unknown size (end = MAX u64 value which shows as huge number)
                               const isUnknownSize = segment.end > Number.MAX_SAFE_INTEGER / 2;
                               const segmentSize = isUnknownSize ? segment.downloaded : (segment.end - segment.start + 1);
@@ -720,17 +721,13 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
                                 : 100 / download.segments.length; // Equal width for unknown size
                               
                               // Calculate left position properly for unknown size
-                              const leftPosition = isUnknownSize 
+                              const leftPosition = isUnknownSize
                                 ? (idx * 100 / download.segments.length)
-                                : download.segments.slice(0, idx).reduce((acc, s) => {
-                                    const sIsUnknown = s.end > Number.MAX_SAFE_INTEGER / 2;
-                                    const sSize = sIsUnknown ? s.downloaded : (s.end - s.start + 1);
-                                    return acc + (sSize / (download.size || 1)) * 100;
-                                  }, 0);
+                                : (segment.start / (download.size || 1)) * 100;
                               
                               return (
                                 <div
-                                  key={idx}
+                                  key={segment.index}
                                   className="absolute top-0 h-full"
                                   style={{
                                     left: `${leftPosition}%`,
@@ -763,7 +760,7 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
                           
                           {/* Segment details */}
                           <div className="grid grid-cols-2 gap-1 text-[10px] text-muted-foreground">
-                            {download.segments.map((segment, idx) => {
+                            {orderedSegments.map((segment, idx) => {
                               // Handle unknown size (end = MAX u64 value)
                               const isUnknownSize = segment.end > Number.MAX_SAFE_INTEGER / 2;
                               const segmentSize = isUnknownSize ? segment.downloaded : (segment.end - segment.start + 1);
@@ -774,7 +771,7 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
                                     : (segmentSize > 0 ? (segment.downloaded / segmentSize) * 100 : 0));
                               
                               return (
-                                <div key={idx} className="space-y-1">
+                                <div key={segment.index} className="space-y-1">
                                   <div className="flex justify-between">
                                     <span>{t('downloadItem.segShort', { n: idx + 1 })}</span>
                                     <span>

@@ -58,6 +58,7 @@ interface DownloadInfoDialogProps {
 
 export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInfoDialogProps) {
   const { t } = useTranslation();
+  const orderedSegments = [...(download?.segments ?? [])].sort((a, b) => a.start - b.start);
   const queue = useQueueStore((s) => download ? s.queues.get(download.queue_id) : null);
   const updateDownload = useDownloadStore((s) => s.updateDownload);
   
@@ -552,7 +553,7 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
                 
                 {/* Segment Visualization */}
                 <div className="flex gap-0.5 h-3 rounded overflow-hidden bg-muted">
-                  {download.segments.map((segment, index) => {
+                  {orderedSegments.map((segment, index) => {
                     // Handle unknown size (end = MAX u64 value)
                     const isUnknownSize = segment.end > Number.MAX_SAFE_INTEGER / 2;
                     const segmentSize = isUnknownSize ? segment.downloaded : (segment.end - segment.start + 1);
@@ -564,8 +565,9 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
                     const displaySize = isUnknownSize ? t('downloadItem.streaming', { size: formatBytes(segment.downloaded || 0) }) : formatBytes(segmentSize);
                     return (
                       <div
-                        key={index}
-                        className="flex-1 relative"
+                        key={segment.index}
+                        className="relative"
+                        style={{ flexGrow: isUnknownSize ? 1 : segmentSize, flexBasis: 0 }}
                         title={t('downloadInfo.segmentBarTitle', { n: index + 1, downloaded: formatBytes(segment.downloaded || 0), size: displaySize })}
                       >
                         <div
@@ -580,12 +582,12 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
                 {/* Segment Details */}
                 <ScrollArea className="h-24">
                   <div className="space-y-1 text-xs">
-                    {download.segments.map((segment, index) => {
+                    {orderedSegments.map((segment, index) => {
                       const isUnknownSize = segment.end > Number.MAX_SAFE_INTEGER / 2;
                       const segmentSize = isUnknownSize ? segment.downloaded : (segment.end - segment.start + 1);
                       const displaySize = isUnknownSize ? t('downloadInfo.streamingShort') : formatBytes(segmentSize);
                       return (
-                        <div key={index} className="flex items-center justify-between px-2 py-1 rounded bg-muted/50">
+                        <div key={segment.index} className="flex items-center justify-between px-2 py-1 rounded bg-muted/50">
                           <span className="font-medium">{t('downloadInfo.segmentN', { n: index + 1 })}</span>
                           <span className="text-muted-foreground">
                             {formatBytes(segment.downloaded || 0)} / {displaySize}

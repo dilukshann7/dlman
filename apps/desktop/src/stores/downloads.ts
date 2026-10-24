@@ -126,9 +126,18 @@ export const useDownloadStore = create<DownloadState>()(
         set((state) => {
           const downloads = new Map(state.downloads);
           const download = downloads.get(id);
-          if (download && download.segments[segmentIndex]) {
+          const position = download?.segments.findIndex((segment) => segment.index === segmentIndex) ?? -1;
+          if (download && position >= 0) {
             const segments = [...download.segments];
-            segments[segmentIndex] = { ...segments[segmentIndex], downloaded };
+            const segment = segments[position];
+            const unknownSize = segment.end > Number.MAX_SAFE_INTEGER / 2;
+            const size = segment.end - segment.start + 1;
+            const accepted = unknownSize ? downloaded : Math.min(downloaded, size);
+            segments[position] = {
+              ...segment,
+              downloaded: accepted,
+              complete: !unknownSize && accepted === size,
+            };
             downloads.set(id, { ...download, segments });
           }
           return { downloads };
