@@ -545,12 +545,13 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
 
 #[tauri::command]
 pub async fn update_settings(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
     tracing::info!("update_settings called with default_segments={}", settings.default_segments);
     state
-        .with_core_async(|core| async move { core.update_settings(settings).await })
+        .with_core_async(|core| async move { crate::autostart::save(&app_handle, &core, settings).await })
         .await
 }
 

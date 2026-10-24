@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
@@ -64,6 +63,7 @@ import { getIconComponent } from '@/lib/categoryIcons';
 import { CategoryDialog } from './CategoryDialog';
 import type { Settings as SettingsType, Theme, ProxySettings, SiteCredential } from '@/types';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { LOCALES } from '@/i18n/config';
 import { FONTS } from '@/i18n/fonts';
 
@@ -227,8 +227,8 @@ export function SettingsDialog() {
   const handleSave = useCallback(async () => {
     try {
       setIsSaving(true);
-      // Update local store first (this persists to localStorage)
-      updateSettings(localSettings);
+      // Update the local store after SQLite persistence and native startup registration succeed.
+      await updateSettings(localSettings);
       
       // Save category paths
       categoryPaths.forEach((path, categoryId) => {
@@ -238,21 +238,13 @@ export function SettingsDialog() {
         }
       });
       
-      // Try to sync with backend if in Tauri context
-      const isTauri = typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
-      if (isTauri) {
-        try {
-          await invoke('update_settings', { settings: localSettings });
-        } catch (err) {
-          // Backend sync failed, but local settings are saved
-          console.warn('Backend settings sync failed:', err);
-        }
-      }
+      // Native backend synchronization is awaited by updateSettings above; failures keep this dialog open.
       
       setHasChanges(false);
       setShowSettingsDialog(false);
     } catch (err) {
       console.error('Failed to save settings:', err);
+      toast.error(String(err));
     } finally {
       setIsSaving(false);
     }
@@ -592,7 +584,7 @@ export function SettingsDialog() {
                     value={localSettings.language || 'en'}
                     onValueChange={(code) => {
                       handleChange('language', code);
-                      updateSettings({ language: code }); // apply immediately
+                      void updateSettings({ language: code }).catch((error) => toast.error(String(error))); // apply immediately
                     }}
                   >
                     <SelectTrigger id="language">
@@ -620,7 +612,7 @@ export function SettingsDialog() {
                     onValueChange={(value) => {
                       const font = value === FONT_AUTO ? null : value;
                       handleChange('font', font);
-                      updateSettings({ font }); // apply immediately
+                      void updateSettings({ font }).catch((error) => toast.error(String(error))); // apply immediately
                     }}
                   >
                     <SelectTrigger id="font">

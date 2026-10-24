@@ -78,7 +78,7 @@ impl DownloadDatabase {
                 theme TEXT NOT NULL DEFAULT 'system',
                 dev_mode INTEGER NOT NULL DEFAULT 0,
                 minimize_to_tray INTEGER NOT NULL DEFAULT 1,
-                start_on_boot INTEGER NOT NULL DEFAULT 0,
+                start_on_boot INTEGER NOT NULL DEFAULT 1,
                 browser_integration_port INTEGER NOT NULL DEFAULT 7899,
                 remember_last_path INTEGER NOT NULL DEFAULT 1,
                 max_retries INTEGER NOT NULL DEFAULT 5,

@@ -2,6 +2,7 @@
 //!
 //! Tauri-based desktop application for DLMan.
 
+mod autostart;
 mod browser_server;
 mod commands;
 mod log_forward;
@@ -39,8 +40,11 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         tray::show_main_window(app);
     }));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_autostart::Builder::new().app_name("DLMan").build());
 
     builder
+        .manage(autostart::SettingsLock::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -74,6 +78,16 @@ pub fn run() {
 
             match state {
                 Ok(state) => {
+                    // Reconcile saved preferences on each launch and refresh an installed app's path.
+                    // Development launches must not register a temporary build as the login executable.
+                    if !tauri::is_dev() {
+                        let enabled = tauri::async_runtime::block_on(
+                            state.with_core_async(|core| async move { Ok(core.get_settings().await.start_on_boot) }),
+                        )?;
+                        if let Err(error) = autostart::apply(app.handle(), enabled) {
+                            tracing::warn!(%error, "Could not synchronize launch at login");
+                        }
+                    }
                     // Start forwarding core events to frontend
                     state.start_event_forwarding(app.handle().clone());
                     

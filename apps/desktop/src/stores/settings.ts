@@ -10,7 +10,7 @@ interface SettingsState {
   // Actions
   setTheme: (theme: Theme) => void;
   setDevMode: (devMode: boolean) => void;
-  updateSettings: (settings: Partial<Settings>) => void;
+  updateSettings: (settings: Partial<Settings>) => Promise<void>;
   setDefaultDownloadPath: (path: string) => void;
   // Load settings from backend (SQLite - single source of truth)
   loadFromBackend: () => Promise<void>;
@@ -30,7 +30,7 @@ const defaultSettings: Settings = {
   theme: "system",
   dev_mode: false,
   minimize_to_tray: true,
-  start_on_boot: false,
+  start_on_boot: true,
   browser_integration_port: 7899,
   remember_last_path: true,
   max_retries: 5,
@@ -51,6 +51,8 @@ const defaultSettings: Settings = {
   // Temp/scratch storage for in-progress segment files
   temp_storage: { mode: "auto", custom_path: null },
 };
+
+let settingsUpdates: Promise<void> = Promise.resolve();
 
 export const useSettingsStore = create<SettingsState>()(
   (set, get) => ({
@@ -74,11 +76,20 @@ export const useSettingsStore = create<SettingsState>()(
       get().saveToBackend();
     },
     updateSettings: (newSettings) => {
-      set((state) => ({
-        settings: { ...state.settings, ...newSettings },
-      }));
-      // Auto-save to backend
-      get().saveToBackend();
+      const update = settingsUpdates.then(async () => {
+        const settings = { ...get().settings, ...newSettings };
+        const isTauri = typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
+        if (isTauri && !get().loaded) throw new Error('Settings are still loading. Try again.');
+        // Auto-save to backend before publishing settings, including native login registration.
+        if (isTauri) {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('update_settings', { settings });
+        }
+        set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+      });
+      // A failed registration must reject its caller without blocking subsequent saves.
+      settingsUpdates = update.catch(() => {});
+      return update;
     },
     setDefaultDownloadPath: (path) => {
       set((state) => ({
@@ -105,22 +116,21 @@ export const useSettingsStore = create<SettingsState>()(
         set({ settings: backendSettings, loaded: true });
       } catch (err) {
         console.error('[Settings] Failed to load settings from backend:', err);
-        set({ loaded: true }); // Still mark as loaded with defaults
+        set({ loaded: false }); // Keep defaults visible, but never overwrite settings that could not be loaded.
       }
     },
     
     // Save settings to backend SQLite
     saveToBackend: async () => {
       const isTauri = typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
-      if (!isTauri) {
+      if (!isTauri || !get().loaded) {
         return;
       }
       
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
         const settings = get().settings;
         console.log('[Settings] Saving to SQLite:', settings);
-        await invoke('update_settings', { settings });
+        await get().updateSettings({});
         console.log('[Settings] Saved to backend successfully');
       } catch (err) {
         console.error('[Settings] Failed to save settings to backend:', err);

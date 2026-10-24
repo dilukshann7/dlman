@@ -319,6 +319,7 @@ pub struct Settings {
     pub theme: Theme,
     pub dev_mode: bool,
     pub minimize_to_tray: bool,
+    #[serde(default = "default_start_on_boot")]
     pub start_on_boot: bool,
     pub browser_integration_port: u16,
     pub remember_last_path: bool,
@@ -345,6 +346,10 @@ pub struct Settings {
 
 fn default_language() -> String {
     "en".to_string()
+}
+
+fn default_start_on_boot() -> bool {
+    true
 }
 
 /// Proxy configuration
@@ -440,7 +445,7 @@ impl Default for Settings {
             theme: Theme::System,
             dev_mode: false,
             minimize_to_tray: true,
-            start_on_boot: false,
+            start_on_boot: default_start_on_boot(),
             browser_integration_port: 7899,
             remember_last_path: true,
             max_retries: 5,

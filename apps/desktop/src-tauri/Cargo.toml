@@ -38,9 +38,13 @@ futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.55"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "=2.5.1"
 
 [features]
 # Editor checks use devUrl without requiring generated frontend assets.

@@ -36,6 +36,7 @@ const isTauri = () => typeof window !== 'undefined' && (window as any).__TAURI_I
 function AppContent() {
   const theme = useSettingsStore((s) => s.settings.theme);
   const defaultDownloadPath = useSettingsStore((s) => s.settings.default_download_path);
+  const settingsLoaded = useSettingsStore((s) => s.loaded);
   const setDefaultDownloadPath = useSettingsStore((s) => s.setDefaultDownloadPath);
   const { showBulkDeleteDialog, setShowBulkDeleteDialog } = useUIStore();
   const { selectedIds, downloads, removeDownload, clearSelection } = useDownloadStore();
@@ -125,12 +126,14 @@ function AppContent() {
 
   // Resolve default download path on startup
   useEffect(() => {
+    if (!settingsLoaded) return;
+    let cancelled = false;
     const resolveDefaultPath = async () => {
       if (isTauri() && defaultDownloadPath.startsWith('~')) {
         try {
           const home = await homeDir();
           const resolvedPath = defaultDownloadPath.replace('~', home);
-          setDefaultDownloadPath(resolvedPath);
+          if (!cancelled) setDefaultDownloadPath(resolvedPath);
         } catch (err) {
           console.error('Failed to resolve home directory:', err);
         }
@@ -138,7 +141,8 @@ function AppContent() {
     };
     
     resolveDefaultPath();
-  }, [defaultDownloadPath, setDefaultDownloadPath]);
+    return () => { cancelled = true; };
+  }, [defaultDownloadPath, setDefaultDownloadPath, settingsLoaded]);
 
   // Apply theme
   useEffect(() => {
