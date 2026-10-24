@@ -37,7 +37,9 @@ tower-http = { version = "0.5", features = ["cors"] }
 futures-util = "0.3"
 
 [features]
-default = ["custom-protocol"]
+# Editor checks use devUrl without requiring generated frontend assets.
+# The Tauri CLI enables custom-protocol when packaging the application.
+default = []
 custom-protocol = ["tauri/custom-protocol"]
 devtools = ["tauri/devtools"]
 

@@ -110,7 +110,7 @@ pub async fn add_download(
                 }
             }
             
-            download.source_page_url = source_page_url.filter(|url| dlman_core::engine::refresh::http_url(url).is_ok());
+            download.source_page_url = source_page_url.filter(|url| dlman_core::refresh::http_url(url).is_ok());
             core.download_manager.db().upsert_download(&download).await?;
             core.emit(dlman_types::CoreEvent::DownloadUpdated { download: download.clone() });
             if auto_start { core.resume_download(download.id).await?; }
@@ -216,7 +216,7 @@ pub async fn resume_download(state: State<'_, AppState>, id: String) -> Result<(
 }
 
 #[tauri::command]
-pub async fn begin_download_refresh(state: State<'_, AppState>, id: String) -> Result<dlman_core::engine::refresh::RefreshSessionInfo, String> {
+pub async fn begin_download_refresh(state: State<'_, AppState>, id: String) -> Result<dlman_core::refresh::RefreshSessionInfo, String> {
     let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
     state.with_core_async(|core| async move { core.download_manager.begin_refresh(id).await }).await
 }
