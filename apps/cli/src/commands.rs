@@ -4,7 +4,7 @@ use crate::{ConfigAction, OutputFormat, QueueAction};
 use anyhow::{anyhow, Result};
 use console::style;
 use dlman_core::DlmanCore;
-use dlman_types::{Download, DownloadStatus, Queue, QueueOptions};
+use dlman_types::{Download, DownloadStatus, QueueOptions};
 use std::path::PathBuf;
 use uuid::Uuid;
 

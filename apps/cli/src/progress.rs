@@ -48,8 +48,8 @@ impl DownloadProgress {
                 id,
                 downloaded,
                 total,
-                speed,
-                eta,
+                speed: _,
+                eta: _,
             } => {
                 let bars = self.bars.read().await;
                 if let Some(pb) = bars.get(id) {

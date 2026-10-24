@@ -3,7 +3,9 @@
 //! A powerful CLI tool for managing downloads with multi-segment acceleration.
 
 mod commands;
+#[expect(dead_code, reason = "Output helpers are not yet wired into CLI commands.")]
 mod output;
+#[expect(dead_code, reason = "CLI commands do not yet render foreground download progress.")]
 mod progress;
 
 use anyhow::Result;
