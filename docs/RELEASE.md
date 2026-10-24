@@ -8,7 +8,8 @@ When you push a version tag, GitHub Actions automatically:
 1. Builds the desktop app for Windows, macOS, and Linux
 2. Builds the browser extension for Chrome and Firefox
 3. Creates ZIPs for the extensions
-4. Uploads all artifacts to the GitHub Release
+4. Uploads all artifacts to a draft GitHub Release
+5. Checks that every supported desktop package and both extension ZIPs exist, then publishes the release
 
 **No manual building or uploading needed!** ✅
 
@@ -25,6 +26,7 @@ apps/desktop/package.json
 apps/desktop/src-tauri/tauri.conf.json
 apps/extension/package.json
 apps/extension/wxt.config.ts (manifest version)
+Cargo.lock              (the four dlman workspace packages)
 ```
 
 All should be bumped together. Example for v1.6.0:
@@ -59,21 +61,25 @@ git push origin v1.6.0
 
 ### Step 3: GitHub Actions Takes Over
 
-Two workflows trigger automatically:
+One workflow orchestrates a tagged release:
 
 #### 1. **Build and Release** (`.github/workflows/release.yml`)
 - Runs on: Windows, macOS (Intel & Apple Silicon), Linux
 - Builds the desktop app
 - Creates platform-specific installers (`.msi`, `.dmg`, `.deb`, `.rpm`, `.AppImage`)
 - Uploads to GitHub Release
+- Builds Chrome and Firefox extension ZIPs once
+- Publishes only after all platform jobs succeed and required assets are present
 
-#### 2. **Build Browser Extensions** (`.github/workflows/build-extensions.yml`)
+#### Manual extension builds (`.github/workflows/build-extensions.yml`)
+- Runs only through manual dispatch; tagged releases use the extension job above
 - Builds Chrome extension
 - Builds Firefox extension
 - Creates ZIPs: `dlman-extension-chrome.zip`, `dlman-extension-firefox.zip`
-- Uploads to the same GitHub Release
+- Leaves tagged-release publication to the main release workflow
 
-**Total time:** ~5-10 minutes
+Build time depends on runner availability and dependency caches. A failed build
+leaves the release as a draft; repair the failure and rerun the failed jobs.
 
 ### Step 4: Verify
 

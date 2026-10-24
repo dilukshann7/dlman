@@ -1,4 +1,4 @@
-"""Generate app, extension and website icons from the supplied DLMan artwork.
+"""Generate solid-white app, extension and website icons from the DLMan silhouette.
 
 Requires Pillow: python -m pip install Pillow
 Run from any directory: python tools/generate-branding.py [--check]
@@ -36,6 +36,11 @@ def generate() -> dict[Path, bytes]:
     with Image.open(SOURCE) as original:
         source = ImageOps.pad(original.convert("RGBA"), (max(original.size),) * 2,
                               method=Image.Resampling.LANCZOS, color=(0, 0, 0, 0))
+    # Preserve the supplied shape and antialiased transparency exactly. Color is
+    # deliberately independent of the original purple gradient.
+    alpha = source.getchannel("A")
+    source = Image.new("RGBA", source.size, "white")
+    source.putalpha(alpha)
     outputs: dict[Path, bytes] = {}
 
     def png(size: int, *, opaque: bool = False, foreground: bool = False) -> bytes:
@@ -47,7 +52,8 @@ def generate() -> dict[Path, bytes]:
             image.paste(source.resize((inner, inner), Image.Resampling.LANCZOS),
                         ((size - inner) // 2,) * 2)
         if opaque:
-            background = Image.new("RGBA", image.size, "white")
+            # White artwork needs a dark background on platforms forbidding alpha.
+            background = Image.new("RGBA", image.size, "#18181b")
             background.alpha_composite(image)
             image = background.convert("RGB")
         buffer = BytesIO()
@@ -55,7 +61,7 @@ def generate() -> dict[Path, bytes]:
         return buffer.getvalue()
 
     desktop = {"icon.png": 512, "128x128@2x.png": 256, "StoreLogo.png": 50}
-    desktop.update({f"{size}x{size}.png": size for size in (16, 32, 48, 64, 128)})
+    desktop.update({f"{size}x{size}.png": size for size in (16, 20, 24, 28, 32, 40, 48, 64, 128)})
     desktop.update({f"Square{size}x{size}Logo.png": size
                     for size in (30, 44, 71, 89, 107, 142, 150, 284, 310)})
     for name, size in desktop.items():
@@ -77,7 +83,15 @@ def generate() -> dict[Path, bytes]:
 
     for name, format_name, size in (("icon.ico", "ICO", 256), ("icon.icns", "ICNS", 1024)):
         buffer = BytesIO()
-        source.resize((size, size), Image.Resampling.LANCZOS).save(buffer, format=format_name)
+        options = {}
+        if format_name == "ICO":
+            sizes = [(side, side) for side in (16, 20, 24, 28, 32, 40, 48, 64, 96, 128, 256)]
+            # Supply each native frame directly from the original silhouette.
+            # Otherwise Pillow resizes the 256 px image again for small icons.
+            options = {"sizes": sizes, "append_images": [
+                source.resize(frame_size, Image.Resampling.LANCZOS) for frame_size in sizes
+            ]}
+        source.resize((size, size), Image.Resampling.LANCZOS).save(buffer, format=format_name, **options)
         data = buffer.getvalue()
         outputs[ICONS / name] = largest_ico_frame_first(data) if format_name == "ICO" else data
 

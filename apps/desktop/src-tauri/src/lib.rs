@@ -7,6 +7,8 @@ mod commands;
 mod log_forward;
 mod state;
 mod window_manager;
+#[cfg(windows)]
+mod window_icons;
 
 use state::AppState;
 use tauri::{Listener, Manager};
@@ -40,6 +42,11 @@ pub fn run() {
         .setup(|app| {
             // Enable forwarding Rust logs to the frontend Dev Console.
             log_forward::set_app_handle(app.handle().clone());
+
+            #[cfg(windows)]
+            for window in app.webview_windows().values() {
+                window_icons::install(window);
+            }
 
             // Initialize application state synchronously using block_on
             let data_dir = app

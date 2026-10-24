@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.13.0] - 2026-10-24
+
+### Added
+
+- Managed YouTube video and MP3 downloads with bundled extraction tools.
+- Explicit browser-extension verification for YouTube sessions that require sign-in.
+- Expired-address refresh that preserves compatible partial downloads.
+- Dynamic download segmentation and stable segment tracking in the desktop interface.
+
+### Changed
+
+- Replaced the purple logo gradient with a solid-white mark across the app, browser extension, and website.
+- Added DPI-matched native Windows title-bar and taskbar icons, refreshed when moving between monitors.
+- Pointed project, support, download, update, and release links to this fork. Sponsor links currently open the repository.
+- Synchronized desktop, CLI, and extension versions at 1.13.0.
+
+### Fixed
+
+- Combined and estimated video-size reporting for adaptive YouTube downloads.
+- Main-window size restoration and focus when opening browser-captured downloads.
+- Browser-mode version reporting now follows the desktop package version.
+
 ## [1.11.1] - 2026-06-30
 
 ### 🐛 Bug Fixes

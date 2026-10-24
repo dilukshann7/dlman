@@ -8,6 +8,7 @@
  */
 
 import { getVersion as getTauriVersion, getName as getTauriName } from '@tauri-apps/api/app';
+import { version as packageVersion } from '../../package.json';
 
 const GITHUB_REPO = 'dilukshann7/dlman';
 const GITHUB_RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
@@ -54,7 +55,7 @@ export async function getAppVersion(): Promise<VersionInfo> {
   }
 
   // Fallback for development/browser mode
-  cachedVersion = { current: '1.3.1', appName: 'DLMan' };
+  cachedVersion = { current: packageVersion, appName: 'DLMan' };
   return cachedVersion;
 }
 

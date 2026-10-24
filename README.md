@@ -56,7 +56,7 @@ existing download manager foundation:
   and final output is verified before publication.
 - **Bundled media tools:** checksum-pinned yt-dlp, Deno, FFmpeg, and ffprobe are
   prepared for the four desktop release targets, with third-party notices.
-- **New branding:** the supplied purple globe-and-arrow logo is used throughout
+- **New branding:** the solid-white globe-and-arrow logo is used throughout
   the app, extension, native icon sets, and website assets. See [artwork](assets/README.md).
 
 See [YouTube support](docs/youtube-support.md) for supported URLs, limitations,

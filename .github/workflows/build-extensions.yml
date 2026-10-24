@@ -1,9 +1,7 @@
 name: Build Browser Extensions
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Tagged releases build extensions once, in release.yml.
   workflow_dispatch:
 
 permissions:

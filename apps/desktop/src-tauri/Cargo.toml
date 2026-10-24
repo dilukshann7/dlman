@@ -36,6 +36,9 @@ axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 futures-util = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+
 [features]
 # Editor checks use devUrl without requiring generated frontend assets.
 # The Tauri CLI enables custom-protocol when packaging the application.
