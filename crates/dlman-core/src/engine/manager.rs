@@ -553,7 +553,7 @@ impl DownloadManager {
         let mut refresh = self.refresh.lock().await;
         if refresh.as_ref().is_some_and(|s| s.info.download_id == id) { *refresh = None; }
         drop(refresh);
-        let mut tasks = self.active_tasks.write().await;
+        let tasks = self.active_tasks.write().await;
         
         if let Some(handle) = tasks.get(&id) {
             handle.cancelled.store(true, std::sync::atomic::Ordering::Release);

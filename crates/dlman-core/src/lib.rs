@@ -790,15 +790,12 @@ impl DlmanCore {
         // Update downloads
         for id in ids {
             let operation = self.download_manager.edit_guard(id).await?;
-            let mut download = self.get_download(id).await?;
+            let download = self.get_download(id).await?;
             let restart_youtube = download.youtube.is_some() && download.status == DownloadStatus::Downloading;
             if restart_youtube {
                 self.stop_youtube(id, DownloadStatus::Paused).await?;
-                download = self.get_download(id).await?;
             }
-            download.queue_id = queue_id;
             // Clear the download's speed limit override so it uses the new queue's limit
-            download.speed_limit = None;
             self.download_manager.db().update_download_queue(id, queue_id, true).await?;
             
             drop(operation);
