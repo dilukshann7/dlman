@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.13.1] - 2026-10-24
+
+### Fixed
+
+- Prevented duplicate app processes. Reopening DLMan now restores and focuses the existing window, including browser deep-link activations.
+- Moved tray creation to the native process so React startup, reloads, and concurrent initialization cannot create duplicate tray icons.
+- Sized Windows tray artwork using the taskbar's DPI, independently of the monitor containing the main window, and refresh it when DPI changes are observed.
+- Kept native tray clicks working after webview reloads and correctly parsed forwarded deep-link URL arrays.
+
 ## [1.13.0] - 2026-10-24
 
 ### Added

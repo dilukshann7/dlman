@@ -6,6 +6,7 @@ mod browser_server;
 mod commands;
 mod log_forward;
 mod state;
+mod tray;
 mod window_manager;
 #[cfg(windows)]
 mod window_icons;
@@ -31,7 +32,15 @@ pub fn run() {
         .with(log_forward::TauriLogForwardLayer::default())
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Register first: repeated launches and protocol activations must reach the
+    // running process before any download state or browser server is created.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        tray::show_main_window(app);
+    }));
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -42,6 +51,8 @@ pub fn run() {
         .setup(|app| {
             // Enable forwarding Rust logs to the frontend Dev Console.
             log_forward::set_app_handle(app.handle().clone());
+
+            tray::install(app)?;
 
             #[cfg(windows)]
             for window in app.webview_windows().values() {
@@ -83,8 +94,8 @@ pub fn run() {
             // The deep-link plugin emits events that we listen for
             let app_handle = app.handle().clone();
             app.listen("deep-link://new-url", move |event| {
-                let urls = event.payload();
-                for url in urls.lines() {
+                let urls = window_manager::deep_link_urls(event.payload());
+                for url in urls {
                     if let Some(path) = url.strip_prefix("dlman://") {
                         // Parse URL to extract action
                         if path.starts_with("add-download") {

@@ -12,6 +12,8 @@ to select at native resolution. Keep this ordering when regenerating icons.
 The ICO includes native 16, 20, 24, 28, 32, 40, 48, 64, 96, 128 and 256 px frames.
 Windows title bars and taskbars each receive an icon matched to their system
 metrics and the window's DPI. The application refreshes both on monitor changes.
+The Windows notification-area icon uses Explorer's taskbar DPI instead of the
+main window's scale. Rust owns its lifecycle so webview reloads cannot duplicate it.
 
 To regenerate the committed assets without building an application:
 

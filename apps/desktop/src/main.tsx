@@ -5,9 +5,13 @@ import "./styles/globals.css";
 // Initializes i18next and applies the saved language/direction/font before render.
 import "./i18n";
 import { rememberWindowState } from "./lib/window-state";
+import { initSystemIntegrations } from "./lib/system-tray";
+import { initNotifications } from "./lib/notifications";
 
 // Initialize once per webview, outside React StrictMode's effect replay.
 if (window.__TAURI_INTERNALS__) {
+  initSystemIntegrations().catch(console.error);
+  initNotifications().catch(console.error);
   rememberWindowState()
     .then((cleanup) => window.addEventListener('pagehide', cleanup, { once: true }))
     .catch((error) => console.error('Failed to initialize window state:', error));

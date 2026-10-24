@@ -6,6 +6,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use std::sync::Mutex;
 use std::collections::HashMap;
 
+/// Tauri deep-link events carry a JSON array; retain legacy newline payloads.
+pub fn deep_link_urls(payload: &str) -> Vec<String> {
+    serde_json::from_str(payload).unwrap_or_else(|_| payload.lines().map(str::to_owned).collect())
+}
+
 /// Window manager for tracking windows
 pub struct WindowManager {
     windows: Mutex<HashMap<String, String>>,
@@ -64,5 +69,21 @@ impl WindowManager {
 impl Default for WindowManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deep_link_urls;
+
+    #[test]
+    fn accepts_forwarded_json_deep_links_without_changing_urls() {
+        assert_eq!(deep_link_urls(r#"["dlman://add-download?url=https%3A%2F%2Fexample.com%2Ffile"]"#),
+                   vec!["dlman://add-download?url=https%3A%2F%2Fexample.com%2Ffile"]);
+    }
+
+    #[test]
+    fn retains_legacy_newline_deep_links() {
+        assert_eq!(deep_link_urls("dlman://first\ndlman://second"), vec!["dlman://first", "dlman://second"]);
     }
 }

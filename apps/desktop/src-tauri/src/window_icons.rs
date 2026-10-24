@@ -1,16 +1,36 @@
 //! DPI-matched Windows title-bar and taskbar icons from the multi-size ICO.
 
 use std::{io, sync::Mutex};
-use tauri::{Manager, WebviewWindow, WindowEvent};
+use tauri::{image::Image, Manager, WebviewWindow, WindowEvent};
 use windows_sys::Win32::UI::{
-    HiDpi::GetSystemMetricsForDpi,
+    HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi},
     WindowsAndMessaging::{
-        CreateIconFromResourceEx, DestroyIcon, SendMessageW, ICON_BIG, ICON_SMALL, SM_CXICON,
-        SM_CXSMICON, WM_SETICON,
+        CreateIconFromResourceEx, DestroyIcon, FindWindowW, SendMessageW, ICON_BIG, ICON_SMALL,
+        SM_CXICON, SM_CXSMICON, WM_SETICON,
     },
 };
 
 const ICO: &[u8] = include_bytes!("../icons/icon.ico");
+
+pub fn tray_icon_size() -> i32 {
+    let taskbar_class: Vec<u16> = "Shell_TrayWnd\0".encode_utf16().collect();
+    // SAFETY: the class name is terminated and the optional title is null.
+    // GetDpiForWindow targets Explorer's primary taskbar rather than our window.
+    unsafe {
+        let taskbar = FindWindowW(taskbar_class.as_ptr(), std::ptr::null());
+        let dpi = if taskbar.is_null() {
+            GetDpiForSystem()
+        } else {
+            GetDpiForWindow(taskbar)
+        };
+        GetSystemMetricsForDpi(SM_CXSMICON, if dpi == 0 { 96 } else { dpi }).max(16)
+    }
+}
+
+pub fn tray_image(size: i32) -> Result<Image<'static>, String> {
+    let frame = frame_for_size(size as u32).ok_or("Missing tray icon frame")?;
+    Image::from_bytes(frame).map_err(|error| error.to_string())
+}
 
 // Keep native handles alive for as long as Windows references them. Storing the
 // opaque value as an integer permits ownership in the Send window-event callback.
@@ -100,6 +120,7 @@ pub fn install(window: &WebviewWindow) {
     let label = window.label().to_owned();
     window.on_window_event(move |event| match event {
         WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            crate::tray::refresh_dpi(&app);
             if let Some(window) = app.get_webview_window(&label) {
                 match WindowIcons::apply(&window, *scale_factor) {
                     Ok(updated) => {
@@ -123,7 +144,7 @@ pub fn install(window: &WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dpi_for_scale, load_icon};
+    use super::{dpi_for_scale, load_icon, tray_image};
     use windows_sys::Win32::{
         Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP},
         UI::WindowsAndMessaging::{GetIconInfo, ICONINFO},
@@ -159,6 +180,14 @@ mod tests {
                 assert_ne!(length, 0);
                 assert_eq!((bitmap.bmWidth, bitmap.bmHeight), (size, size));
             }
+        }
+    }
+
+    #[test]
+    fn tray_images_keep_native_dimensions_for_common_taskbar_dpi() {
+        for size in [16, 20, 24, 28, 32, 40, 48, 64] {
+            let image = tray_image(size).expect("tray PNG must decode");
+            assert_eq!((image.width(), image.height()), (size as u32, size as u32));
         }
     }
 }

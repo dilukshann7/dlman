@@ -10,7 +10,6 @@
 import { TrayIcon } from '@tauri-apps/api/tray';
 import { Menu, MenuItem, Submenu, PredefinedMenuItem } from '@tauri-apps/api/menu';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { exit } from '@tauri-apps/plugin-process';
 import { useUIStore } from '@/stores/ui';
 import { useQueueStore, selectQueuesArray } from '@/stores/queues';
@@ -20,6 +19,7 @@ import i18n from '@/i18n';
 // Track if tray has been initialized (in this JS session)
 let trayInitialized = false;
 let trayIcon: TrayIcon | null = null;
+let trayInitialization: Promise<void> | null = null;
 
 // Track if the i18n language listener has been wired (avoid stacking on reload)
 let menuI18nSubscribed = false;
@@ -98,56 +98,25 @@ export async function initSystemTray(): Promise<void> {
     return;
   }
 
-  try {
-    // Check if a tray icon already exists (survives webview reload)
-    // This prevents duplicate tray icons when the user reloads the page
+  if (trayInitialization) return trayInitialization;
+
+  // Rust creates and owns the only tray before the webview starts. Share the
+  // in-flight binding operation so concurrent startup cannot attach twice.
+  trayInitialization = (async () => {
     const existingTray = await TrayIcon.getById(TRAY_ID);
-    
-    if (existingTray) {
-      console.log('Found existing tray icon, reusing it');
-      trayIcon = existingTray;
-      
-      // Update the menu to ensure action handlers are connected
-      // (old menu handlers were lost when JS was reloaded)
-      const trayMenu = await createTrayMenu();
-      await existingTray.setMenu(trayMenu);
-      
-      trayInitialized = true;
-      return;
+    if (!existingTray) {
+      throw new Error('DLMan native tray is unavailable');
     }
-
-    // No existing tray icon, create a new one
-    const icon = await defaultWindowIcon();
+    trayIcon = existingTray;
+    // Rebind translated menu actions after webview reload. Native click and
+    // DPI handlers stay connected independently of React and the webview.
     const trayMenu = await createTrayMenu();
-
-    // Create the tray icon
-    trayIcon = await TrayIcon.new({
-      id: TRAY_ID,
-      icon: icon || undefined,
-      tooltip: i18n.t('tray.tooltip'),
-      menu: trayMenu,
-      menuOnLeftClick: false, // Left click shows window, right click shows menu
-      action: (event) => {
-        // Handle left click to show/focus the main window
-        if (event.type === 'Click') {
-          if (event.button === 'Left') {
-            showMainWindow();
-          }
-          // Right click automatically shows menu when menuOnLeftClick is false
-        }
-      },
-    });
-
-    // Note: setIconAsTemplate(true) makes the icon monochrome for macOS menu bar
-    // Only use this if the icon is designed as a template (black + transparent)
-    // Since our app icon is colorful, we DON'T set it as template to preserve colors
-    // await trayIcon.setIconAsTemplate(true);
-
+    await existingTray.setMenu(trayMenu);
+    await existingTray.setTooltip(i18n.t('tray.tooltip'));
     trayInitialized = true;
     console.log('System tray initialized successfully');
-  } catch (err) {
-    console.error('Failed to initialize system tray:', err);
-  }
+  })().finally(() => { trayInitialization = null; });
+  return trayInitialization;
 }
 
 /**
