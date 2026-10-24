@@ -3,8 +3,8 @@ import { Github, Heart, Coffee, RefreshCw, ExternalLink, Sparkles } from 'lucide
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 
-const GITHUB_URL = 'https://github.com/novincode/dlman';
-const SPONSORS_URL = 'https://github.com/sponsors/novincode';
+const GITHUB_URL = 'https://github.com/dilukshann7/dlman';
+const SPONSORS_URL = 'https://github.com/dilukshann7/dlman';
 import {
   Dialog,
   DialogContent,

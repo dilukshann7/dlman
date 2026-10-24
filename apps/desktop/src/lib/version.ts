@@ -9,7 +9,7 @@
 
 import { getVersion as getTauriVersion, getName as getTauriName } from '@tauri-apps/api/app';
 
-const GITHUB_REPO = 'novincode/dlman';
+const GITHUB_REPO = 'dilukshann7/dlman';
 const GITHUB_RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const GITHUB_RELEASES_PAGE = `https://github.com/${GITHUB_REPO}/releases/latest`;
 

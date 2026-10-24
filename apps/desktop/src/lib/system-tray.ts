@@ -167,7 +167,7 @@ export async function initAppMenu(): Promise<void> {
               name: 'DLMan',
               version,
               copyright: '© 2025 DLMan Contributors',
-              website: 'https://github.com/novincode/dlman',
+              website: 'https://github.com/dilukshann7/dlman',
             },
           },
         }),
@@ -297,7 +297,7 @@ export async function initAppMenu(): Promise<void> {
           text: i18n.t('appMenu.documentation'),
           action: () => {
             import('@tauri-apps/plugin-shell').then(({ open }) => {
-              open('https://github.com/novincode/dlman#readme');
+              open('https://github.com/dilukshann7/dlman#readme');
             });
           },
         }),
@@ -306,7 +306,7 @@ export async function initAppMenu(): Promise<void> {
           text: i18n.t('appMenu.reportIssue'),
           action: () => {
             import('@tauri-apps/plugin-shell').then(({ open }) => {
-              open('https://github.com/novincode/dlman/issues');
+              open('https://github.com/dilukshann7/dlman/issues');
             });
           },
         }),

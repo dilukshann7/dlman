@@ -996,7 +996,7 @@ export function SettingsDialog() {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      openUrl('https://github.com/novincode/dlman/releases/latest');
+                      openUrl('https://github.com/dilukshann7/dlman/releases/latest');
                     }}
                   >
                     <ExternalLink className="h-4 w-4 mr-2" />
@@ -1021,7 +1021,7 @@ export function SettingsDialog() {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      openUrl('https://github.com/novincode/dlman/releases/latest');
+                      openUrl('https://github.com/dilukshann7/dlman/releases/latest');
                     }}
                   >
                     <ExternalLink className="h-4 w-4 mr-2" />

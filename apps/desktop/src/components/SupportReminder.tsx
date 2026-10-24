@@ -101,7 +101,7 @@ export function SupportReminder() {
 
   const handleStar = async () => {
     try {
-      await openUrl("https://github.com/novincode/dlman");
+      await openUrl("https://github.com/dilukshann7/dlman");
     } catch (err) {
       console.error("Failed to open GitHub:", err);
     }
@@ -110,7 +110,7 @@ export function SupportReminder() {
 
   const handleSponsor = async () => {
     try {
-      await openUrl("https://github.com/sponsors/novincode");
+      await openUrl("https://github.com/dilukshann7/dlman");
     } catch (err) {
       console.error("Failed to open sponsors page:", err);
     }
