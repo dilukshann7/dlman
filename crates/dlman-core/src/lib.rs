@@ -436,11 +436,7 @@ impl DlmanCore {
             .or_else(|| queue.as_ref().and_then(|q| q.speed_limit));
 
         let settings = self.settings.read().await;
-        let segment_count = if !download.segments.is_empty() {
-            download.segments.len() as u32
-        } else {
-            settings.default_segments
-        };
+        let segment_count = settings.default_segments;
         let max_retries = settings.max_retries;
         let retry_delay_secs = settings.retry_delay_seconds;
         drop(settings);
@@ -555,11 +551,7 @@ impl DlmanCore {
         // Immediately start the download instead of relying on queue logic
         let settings = self.settings.read().await;
         let effective_limit = download.speed_limit;
-        let segment_count = if download.segments.is_empty() {
-            settings.default_segments
-        } else {
-            download.segments.len() as u32
-        };
+        let segment_count = settings.default_segments;
         let max_retries = settings.max_retries;
         let retry_delay = settings.retry_delay_seconds;
         drop(settings);
@@ -712,8 +704,7 @@ impl DlmanCore {
         for mut download in downloads {
             let _operation = self.download_manager.edit_guard(download.id).await?;
             download = self.get_download(download.id).await?;
-            download.queue_id = Uuid::nil();
-            self.download_manager.db().upsert_download(&download).await?;
+            self.download_manager.db().update_download_queue(download.id, Uuid::nil(), false).await?;
         }
         
         // Delete queue
@@ -808,7 +799,7 @@ impl DlmanCore {
             download.queue_id = queue_id;
             // Clear the download's speed limit override so it uses the new queue's limit
             download.speed_limit = None;
-            self.download_manager.db().upsert_download(&download).await?;
+            self.download_manager.db().update_download_queue(id, queue_id, true).await?;
             
             drop(operation);
             // YouTube's rate is a process argument; restart against the same stage.

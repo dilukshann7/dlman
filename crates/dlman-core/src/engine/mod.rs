@@ -10,6 +10,7 @@
 mod persistence;
 mod rate_limiter;
 mod segment_worker;
+mod segmentation;
 mod download_task;
 mod manager;
 pub mod refresh;

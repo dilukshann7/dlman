@@ -264,10 +264,39 @@ impl DownloadDatabase {
         .execute(&mut *tx)
         .await?;
         
+        Self::replace_segments(&mut tx, download).await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Save transfer-owned fields after initialization or after workers drain.
+    /// User metadata may be edited concurrently and is deliberately not replaced.
+    pub(crate) async fn save_transfer(&self, download: &Download) -> Result<(), DlmanError> {
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE downloads SET final_url = ?, size = ?, downloaded = ?, status = ?, error = ?, \
+             completed_at = ?, etag = ?, last_modified = ?, supports_range = ?, segment_cache_dir = ? WHERE id = ?",
+        )
+        .bind(&download.final_url).bind(download.size.map(|n| n as i64))
+        .bind(download.downloaded as i64).bind(format!("{:?}", download.status).to_lowercase())
+        .bind(&download.error).bind(download.completed_at.map(|time| time.to_rfc3339()))
+        .bind(&download.etag).bind(&download.last_modified).bind(i64::from(download.supports_range))
+        .bind(download.segment_cache_dir.as_ref().map(|path| path.to_string_lossy().to_string()))
+        .bind(download.id.to_string()).execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 { return Err(DlmanError::NotFound(download.id)); }
+        Self::replace_segments(&mut tx, download).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn replace_segments(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, download: &Download,
+    ) -> Result<(), DlmanError> {
         // Delete old segments
         sqlx::query("DELETE FROM segments WHERE download_id = ?")
             .bind(download.id.to_string())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         
         // Insert new segments
@@ -287,14 +316,40 @@ impl DownloadDatabase {
             .bind(segment.downloaded as i64)
             .bind(if segment.complete { 1i64 } else { 0i64 })
             .bind(None::<String>) // temp_file_path - will add later
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
         
-        tx.commit().await?;
         Ok(())
     }
-    
+
+    /// Change a speed override without replacing a live worker's range map.
+    pub async fn update_download_speed_limit(&self, id: Uuid, limit: Option<u64>) -> Result<(), DlmanError> {
+        let changed = sqlx::query("UPDATE downloads SET speed_limit = ? WHERE id = ?")
+            .bind(limit.map(|n| n as i64)).bind(id.to_string()).execute(&self.pool).await?;
+        if changed.rows_affected() != 1 { return Err(DlmanError::NotFound(id)); }
+        Ok(())
+    }
+
+    /// Move a job without replacing its progress, status, or range ownership.
+    pub async fn update_download_queue(&self, id: Uuid, queue: Uuid, clear_speed: bool) -> Result<(), DlmanError> {
+        let changed = sqlx::query("UPDATE downloads SET queue_id = ?, speed_limit = CASE WHEN ? THEN NULL ELSE speed_limit END WHERE id = ?")
+            .bind(queue.to_string()).bind(clear_speed).bind(id.to_string()).execute(&self.pool).await?;
+        if changed.rows_affected() != 1 { return Err(DlmanError::NotFound(id)); }
+        Ok(())
+    }
+
+    /// Edit user metadata without ever rewriting the live segment table.
+    pub async fn update_download_location_and_category(
+        &self, id: Uuid, destination: &Path, category_id: Option<Uuid>,
+    ) -> Result<(), DlmanError> {
+        let changed = sqlx::query("UPDATE downloads SET destination = ?, category_id = ? WHERE id = ?")
+            .bind(destination.to_string_lossy().to_string())
+            .bind(category_id.map(|id| id.to_string())).bind(id.to_string()).execute(&self.pool).await?;
+        if changed.rows_affected() != 1 { return Err(DlmanError::NotFound(id)); }
+        Ok(())
+    }
+
     /// Load a download by ID
     pub async fn rebind_download(&self, download: &Download) -> Result<(), DlmanError> {
         let mut tx = self.pool.begin().await?;
@@ -398,6 +453,47 @@ impl DownloadDatabase {
         Ok(segments)
     }
     
+    /// Atomically transfer the donor's unreceived tail to a new segment.
+    /// The caller owns the donor and must sync its checkpoint before this call.
+    pub(crate) async fn split_segment(
+        &self,
+        download_id: Uuid,
+        original: &Segment,
+        donor: &Segment,
+        child: &Segment,
+    ) -> Result<(), DlmanError> {
+        if original.is_unknown_size() || original.end < original.start
+            || donor.index != original.index || donor.start != original.start
+            || donor.end < donor.start || donor.end >= original.end
+            || donor.downloaded > donor.size() || donor.complete
+            || child.index == donor.index || child.start != donor.end + 1
+            || child.end != original.end || child.downloaded != 0 || child.complete
+        {
+            return Err(DlmanError::InvalidOperation("Invalid segment split.".into()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE segments SET end_byte = ?, downloaded_bytes = ?, complete = 0 \
+             WHERE download_id = ? AND segment_index = ? AND start_byte = ? AND end_byte = ? AND complete = 0",
+        )
+        .bind(donor.end as i64).bind(donor.downloaded as i64)
+        .bind(download_id.to_string()).bind(donor.index as i64)
+        .bind(original.start as i64).bind(original.end as i64)
+        .execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            return Err(DlmanError::InvalidOperation("Segment changed while splitting.".into()));
+        }
+        sqlx::query(
+            "INSERT INTO segments (download_id, segment_index, start_byte, end_byte, downloaded_bytes, complete) \
+             VALUES (?, ?, ?, ?, 0, 0)",
+        )
+        .bind(download_id.to_string()).bind(child.index as i64)
+        .bind(child.start as i64).bind(child.end as i64)
+        .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Update segment progress
     pub async fn update_segment_progress(
         &self,

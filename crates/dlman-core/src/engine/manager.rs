@@ -47,6 +47,8 @@ pub(super) struct DownloadTaskHandle {
     /// Shared references for control
     paused: Arc<std::sync::atomic::AtomicBool>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Signals that transfer workers and the task cleanup have finished.
+    stopped: tokio_util::sync::CancellationToken,
     /// Rate limiter for this specific download
     rate_limiter: RateLimiter,
 }
@@ -422,6 +424,8 @@ impl DownloadManager {
         // Spawn task with cleanup
         let failure_db = self.db.clone();
         let failure_tx = self.event_tx.clone();
+        let stopped = tokio_util::sync::CancellationToken::new();
+        let stopped_for_cleanup = stopped.clone();
         let task_handle = tokio::spawn(async move {
             let result = task.run().await;
             // Probe/setup errors happen before the task's transfer error handler.
@@ -434,6 +438,7 @@ impl DownloadManager {
             }
             // Remove from active tasks when done
             active_tasks_for_cleanup.write().await.remove(&task_id);
+            stopped_for_cleanup.cancel();
             result
         });
         
@@ -445,6 +450,7 @@ impl DownloadManager {
                 _task_handle: task_handle,
                 paused,
                 cancelled,
+                stopped,
                 rate_limiter: rate_limiter_for_handle,
             },
         );
@@ -480,7 +486,7 @@ impl DownloadManager {
     
     /// Resume a download
     /// `effective_speed_limit` - the resolved speed limit (download override > queue limit > None for unlimited)
-    /// `segment_count` - number of segments for new downloads (ignored if download already has segments)
+    /// `segment_count` - maximum active connections, including resumed downloads
     pub async fn resume(
         &self, 
         id: Uuid, 
@@ -539,6 +545,11 @@ impl DownloadManager {
     /// Cancel a download
     pub async fn cancel(&self, id: Uuid) -> Result<(), DlmanError> {
         let _operation = self.operation.lock().await;
+        self.cancel_locked(id).await
+    }
+
+    /// Caller retains the mutation guard across cancellation and optional deletion.
+    async fn cancel_locked(&self, id: Uuid) -> Result<(), DlmanError> {
         let mut refresh = self.refresh.lock().await;
         if refresh.as_ref().is_some_and(|s| s.info.download_id == id) { *refresh = None; }
         drop(refresh);
@@ -546,6 +557,7 @@ impl DownloadManager {
         
         if let Some(handle) = tasks.get(&id) {
             handle.cancelled.store(true, std::sync::atomic::Ordering::Release);
+            handle.paused.store(false, std::sync::atomic::Ordering::Release);
             info!("Cancelled download {}", id);
         }
         
@@ -564,15 +576,26 @@ impl DownloadManager {
     
     /// Delete a download
     pub async fn delete(&self, id: Uuid, delete_file: bool) -> Result<(), DlmanError> {
+        let _operation = self.operation.lock().await;
         // Load download info BEFORE canceling (so we can check original status)
         let download = self.db.load_download(id).await?;
+        let originally_completed = download.as_ref().is_some_and(|download| download.status == DownloadStatus::Completed);
         
         // Cancel if running
-        self.cancel(id).await?;
+        self.cancel_locked(id).await?;
+
+        // Wait without holding the task map lock: cleanup itself removes the
+        // handle. Then reload so every dynamically created part is included.
+        let stopped = self.active_tasks.read().await.get(&id).map(|handle| handle.stopped.clone());
+        if let Some(stopped) = stopped { stopped.cancelled().await; }
+        let download = self.db.load_download(id).await?;
         
         if let Some(download) = download {
+            // Also clean staging left by a process interruption during assembly.
+            let staging = download.destination.join(format!(".{}.assembling", id));
+            let _ = tokio::fs::remove_file(staging).await;
             // Delete file if requested and was completed (check original status before cancel)
-            if delete_file && download.status == DownloadStatus::Completed {
+            if delete_file && originally_completed {
                 let file_path = download.destination.join(&download.filename);
                 if file_path.exists() {
                     match tokio::fs::remove_file(&file_path).await {
@@ -633,12 +656,7 @@ impl DownloadManager {
     ) -> Result<(), DlmanError> {
         let _operation = self.edit_guard(id).await?;
         // Update in DB (store the user's setting, not the resolved value)
-        let download = self.db.load_download(id).await?
-            .ok_or(DlmanError::NotFound(id))?;
-        
-        let mut updated = download;
-        updated.speed_limit = speed_limit;
-        self.db.upsert_download(&updated).await?;
+        self.db.update_download_speed_limit(id, speed_limit).await?;
         
         // Update rate limiter if download is active
         let tasks = self.active_tasks.read().await;
@@ -683,9 +701,9 @@ impl DownloadManager {
         for download in paused {
             // Use download's stored speed limit and default settings
             // Queue resolution should be done at API layer
-            let segment_count = if download.segments.is_empty() { 4 } else { download.segments.len() as u32 };
-            // Use default retry settings
-            self.resume(download.id, download.speed_limit, segment_count, 5, 30, None).await?;
+            let settings = self.db.load_settings().await?;
+            self.resume(download.id, download.speed_limit, settings.default_segments,
+                settings.max_retries, settings.retry_delay_seconds, None).await?;
         }
         
         Ok(())

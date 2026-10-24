@@ -7,6 +7,7 @@ use crate::engine::rate_limiter::RateLimiter;
 use crate::engine::persistence::DownloadDatabase;
 use crate::error::DlmanError;
 use super::refresh::{invalid, parse_content_range, send_scoped, strong_etag, validate_response_for_file};
+use super::segmentation::{split_tail, SplitCommand, WorkerSnapshot};
 use dlman_types::{CoreEvent, Segment};
 use futures::StreamExt;
 use reqwest::Client;
@@ -15,12 +16,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::broadcast;
-use tracing::{debug, info};
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 use uuid::Uuid;
+
+#[cfg(test)]
+#[path = "segment_worker_tests.rs"]
+mod tests;
 
 /// Result of a segment download
 pub struct SegmentResult {
+    /// Final ownership and progress, including any acknowledged splits.
+    pub segment: Segment,
     /// Path to the downloaded segment file
     pub path: PathBuf,
     /// Total size discovered during download (if previously unknown)
@@ -48,6 +56,10 @@ pub struct SegmentWorker {
     etag: Option<String>,
     referrer: Option<String>,
     allow_html: bool,
+    commands: Option<mpsc::Receiver<SplitCommand>>,
+    snapshot: Option<watch::Sender<WorkerSnapshot>>,
+    stop: CancellationToken,
+    ready: bool,
 }
 
 impl SegmentWorker {
@@ -88,6 +100,10 @@ impl SegmentWorker {
             etag: None,
             referrer: None,
             allow_html: false,
+            commands: None,
+            snapshot: None,
+            stop: CancellationToken::new(),
+            ready: false,
         }
     }
     
@@ -130,6 +146,10 @@ impl SegmentWorker {
             etag: None,
             referrer: None,
             allow_html: false,
+            commands: None,
+            snapshot: None,
+            stop: CancellationToken::new(),
+            ready: false,
         }
     }
     
@@ -141,15 +161,89 @@ impl SegmentWorker {
         self
     }
 
+    pub(super) fn with_control(
+        mut self,
+        commands: mpsc::Receiver<SplitCommand>,
+        snapshot: watch::Sender<WorkerSnapshot>,
+        stop: CancellationToken,
+    ) -> Self {
+        self.commands = Some(commands);
+        self.snapshot = Some(snapshot);
+        self.stop = stop;
+        self
+    }
+
+    fn publish_snapshot(&self) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.send_replace(WorkerSnapshot { segment: self.segment.clone(), ready: self.ready });
+        }
+    }
+
+    fn stop_error(&self) -> Option<DlmanError> {
+        if self.paused.load(Ordering::Acquire) {
+            // The manager must reject resume once this worker begins draining.
+            // Before this point clearing `paused` still resumes the live request.
+            self.cancelled.store(true, Ordering::Release);
+            Some(DlmanError::Paused)
+        } else if self.cancelled.load(Ordering::Acquire) || self.stop.is_cancelled() {
+            Some(DlmanError::Cancelled)
+        } else {
+            None
+        }
+    }
+
+    async fn checkpoint(&self, file: &mut tokio::fs::File) -> Result<(), DlmanError> {
+        file.flush().await?;
+        file.sync_all().await?;
+        self.save_progress().await
+    }
+
+    async fn handle_split(
+        &mut self,
+        file: &mut tokio::fs::File,
+        command: SplitCommand,
+        rollback_checkpoint: &mut u64,
+    ) {
+        let result = async {
+            if !self.ready || self.stop_error().is_some() {
+                return Ok(None);
+            }
+            let Some((donor, child)) = split_tail(&self.segment, command.child_index) else {
+                return Ok(None);
+            };
+            // This is a write boundary: no bytes can cross into the child while
+            // the donor checkpoint and its new ownership map are committed.
+            file.flush().await?;
+            file.sync_all().await?;
+            self.db.split_segment(self.download_id, &self.segment, &donor, &child).await?;
+            self.segment = donor.clone();
+            *rollback_checkpoint = donor.downloaded;
+            self.publish_snapshot();
+            Ok(Some((donor, child)))
+        }.await;
+        // A lost acknowledgement cannot undo a committed split. The coordinator
+        // drains workers and reloads the persistent map on every terminal path.
+        let _ = command.reply.send(result);
+    }
+
     async fn rollback_attempt(&mut self, file: &mut tokio::fs::File, original: u64) -> Result<(), DlmanError> {
         file.set_len(original).await?;
         self.downloaded_bytes.fetch_sub(self.segment.downloaded - original, Ordering::AcqRel);
         self.segment.downloaded = original;
-        self.save_progress().await
+        self.checkpoint(file).await?;
+        self.publish_snapshot();
+        Ok(())
     }
 
     /// Run the segment download
     pub async fn run(mut self) -> Result<SegmentResult, DlmanError> {
+        let result = self.run_inner().await;
+        self.ready = false;
+        self.publish_snapshot();
+        result
+    }
+
+    async fn run_inner(&mut self) -> Result<SegmentResult, DlmanError> {
         info!(
             "Starting segment {} for download {} (bytes {}-{})",
             self.segment.index, self.download_id, self.segment.start, self.segment.end
@@ -163,7 +257,8 @@ impl SegmentWorker {
         if self.segment.complete {
             info!("Segment {} already complete", self.segment.index);
             return Ok(SegmentResult {
-                path: self.temp_file_path,
+                segment: self.segment.clone(),
+                path: self.temp_file_path.clone(),
                 discovered_size: None,
             });
         }
@@ -182,6 +277,9 @@ impl SegmentWorker {
         if existing_size < self.segment.downloaded || (!self.segment.is_unknown_size() && existing_size > self.segment.size()) {
             return Err(invalid("Partial segment length is inconsistent; file was preserved."));
         }
+        if existing_size > self.segment.downloaded {
+            self.downloaded_bytes.fetch_add(existing_size - self.segment.downloaded, Ordering::AcqRel);
+        }
         if existing_size > 0 {
             // For unknown size, always resume; for known size, only if within bounds
             if self.segment.is_unknown_size() || existing_size <= self.segment.size() {
@@ -192,6 +290,15 @@ impl SegmentWorker {
                     self.segment.index, existing_size
                 );
             }
+        }
+        // Reconciliation is normally done by the coordinator, but standalone
+        // workers also account for bytes written after the last saved checkpoint.
+        self.publish_snapshot();
+        let mut rollback_checkpoint = existing_size;
+        let mut control_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+        if let Some(error) = self.stop_error() {
+            self.checkpoint(&mut file).await?;
+            return Err(error);
         }
         
         // Calculate actual byte range to download
@@ -212,7 +319,8 @@ impl SegmentWorker {
                 )
                 .await?;
             return Ok(SegmentResult {
-                path: self.temp_file_path,
+                segment: self.segment.clone(),
+                path: self.temp_file_path.clone(),
                 discovered_size: None,
             });
         }
@@ -226,9 +334,23 @@ impl SegmentWorker {
         // Apply credentials if available (HTTP Basic Auth).
         // Apply browser cookies if available (session-based auth).
         // Redirect handling scopes both to their original origin.
-        let response = send_scoped(&self.client, reqwest::Method::GET, &self.url,
-            self.cookies.as_deref(), self.credentials.as_ref(), self.referrer.as_deref(),
-            range.as_deref(), strong_etag(self.etag.as_deref())).await?;
+        let response = {
+            let request = send_scoped(&self.client, reqwest::Method::GET, &self.url,
+                self.cookies.as_deref(), self.credentials.as_ref(), self.referrer.as_deref(),
+                range.as_deref(), strong_etag(self.etag.as_deref()));
+            tokio::pin!(request);
+            loop {
+                tokio::select! {
+                    result = &mut request => break result?,
+                    _ = control_tick.tick() => {
+                        if let Some(error) = self.stop_error() {
+                            self.checkpoint(&mut file).await?;
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        };
 
         // Check response status
         let status = response.status();
@@ -288,6 +410,8 @@ impl SegmentWorker {
                 }
             }
         } else { return Err(invalid("Server ignored a resume range; partial data was preserved.")); }
+        self.ready = !unknown_size && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        self.publish_snapshot();
         let mut received = 0u64;
 
         // Stream and write chunks
@@ -295,45 +419,88 @@ impl SegmentWorker {
         let mut last_db_update = tokio::time::Instant::now();
         let mut last_event_emit = tokio::time::Instant::now();
         
-        while let Some(chunk_result) = stream.next().await {
-            // Check cancellation first
-            if self.cancelled.load(Ordering::Acquire) {
-                info!("Segment {} cancelled", self.segment.index);
-                self.save_progress().await?;
-                return Err(DlmanError::Cancelled);
+        loop {
+            let chunk_result = tokio::select! {
+                _ = control_tick.tick() => {
+                    if let Some(error) = self.stop_error() {
+                        self.checkpoint(&mut file).await?;
+                        return Err(error);
+                    }
+                    continue;
+                }
+                Some(command) = async {
+                    match &mut self.commands {
+                        Some(commands) => commands.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.handle_split(&mut file, command, &mut rollback_checkpoint).await;
+                    continue;
+                }
+                chunk = stream.next() => match chunk {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+            };
+            // Check cancellation and pause before processing another chunk.
+            // Pausing saves progress and closes the response for a later resume.
+            if let Some(error) = self.stop_error() {
+                self.checkpoint(&mut file).await?;
+                return Err(error);
             }
-            
-            // Check pause - save progress and return Paused error
-            // This allows the HTTP connection to be closed and resumed later
-            if self.paused.load(Ordering::Acquire) {
-                info!("Segment {} paused", self.segment.index);
-                self.save_progress().await?;
-                return Err(DlmanError::Paused);
-            }
-            
+
             let chunk = match chunk_result {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    self.rollback_attempt(&mut file, existing_size).await?;
+                    self.rollback_attempt(&mut file, rollback_checkpoint).await?;
                     return Err(DlmanError::Network(error.without_url()));
                 }
             };
             let chunk_len = chunk.len() as u64;
             if expected_body.is_some_and(|expected| chunk_len > expected.saturating_sub(received)) {
-                self.rollback_attempt(&mut file, existing_size).await?;
+                self.rollback_attempt(&mut file, rollback_checkpoint).await?;
                 return Err(invalid("Server sent more bytes than the requested segment."));
             }
             received += chunk_len;
             
             // Apply rate limiting
-            self.rate_limiter.acquire(chunk_len).await;
+            let limiter = self.rate_limiter.clone();
+            let acquire = limiter.acquire(chunk_len);
+            tokio::pin!(acquire);
+            loop {
+                tokio::select! {
+                    _ = &mut acquire => break,
+                    _ = control_tick.tick() => {
+                        if let Some(error) = self.stop_error() {
+                            self.checkpoint(&mut file).await?;
+                            return Err(error);
+                        }
+                    }
+                    Some(command) = async {
+                        match &mut self.commands {
+                            Some(commands) => commands.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => self.handle_split(&mut file, command, &mut rollback_checkpoint).await,
+                }
+            }
+            if let Some(error) = self.stop_error() {
+                self.checkpoint(&mut file).await?;
+                return Err(error);
+            }
+            let accepted = if self.segment.is_unknown_size() {
+                chunk_len
+            } else {
+                chunk_len.min(self.segment.size().saturating_sub(self.segment.downloaded))
+            };
             
             // Write to temp file
-            file.write_all(&chunk).await?;
+            file.write_all(&chunk[..accepted as usize]).await?;
             
             // Update progress atomically
-            self.segment.downloaded += chunk_len;
-            self.downloaded_bytes.fetch_add(chunk_len, Ordering::AcqRel);
+            self.segment.downloaded += accepted;
+            self.downloaded_bytes.fetch_add(accepted, Ordering::AcqRel);
+            self.publish_snapshot();
             
             // Emit segment progress event every 300ms (throttled, not per-chunk)
             if last_event_emit.elapsed().as_millis() >= 300 {
@@ -347,13 +514,20 @@ impl SegmentWorker {
             
             // Periodically save to database (every 2 seconds)
             if last_db_update.elapsed().as_secs() >= 2 {
-                self.save_progress().await?;
+                self.checkpoint(&mut file).await?;
                 last_db_update = tokio::time::Instant::now();
+            }
+            // Only an acknowledged shortening permits early completion. An
+            // unchanged response must still reach EOF for body validation.
+            if !unknown_size && self.segment.end < end_byte && self.segment.downloaded == self.segment.size() {
+                break;
             }
         }
         
-        if expected_body.is_some_and(|expected| received != expected) {
-            self.rollback_attempt(&mut file, existing_size).await?;
+        let shortened_complete = !unknown_size && self.segment.end < end_byte
+            && self.segment.downloaded == self.segment.size();
+        if !shortened_complete && expected_body.is_some_and(|expected| received != expected) {
+            self.rollback_attempt(&mut file, rollback_checkpoint).await?;
             return Err(invalid("Server truncated the requested segment."));
         }
 
@@ -371,7 +545,8 @@ impl SegmentWorker {
         );
         
         Ok(SegmentResult {
-            path: self.temp_file_path,
+            segment: self.segment.clone(),
+            path: self.temp_file_path.clone(),
             discovered_size,
         })
     }

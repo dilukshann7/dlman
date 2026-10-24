@@ -415,6 +415,9 @@ pub async fn update_download(
             
             // Update destination
             if let Some(destination) = updates.destination {
+                if core.download_manager.is_active(uuid).await {
+                    return Err(dlman_core::DlmanError::InvalidOperation("Pause this download and wait for its workers to stop before changing its destination.".into()));
+                }
                 if download.youtube.is_some() && download.status == dlman_types::DownloadStatus::Downloading {
                     return Err(dlman_core::DlmanError::InvalidOperation("Pause this YouTube download before changing its destination.".into()));
                 }
@@ -423,7 +426,9 @@ pub async fn update_download(
             }
             
             if needs_db_update {
-                core.download_manager.db().upsert_download(&download).await?;
+                core.download_manager.db().update_download_location_and_category(
+                    uuid, &download.destination, download.category_id,
+                ).await?;
             }
             Ok(())
         })

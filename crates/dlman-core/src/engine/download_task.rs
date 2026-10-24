@@ -14,6 +14,13 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
+
+#[path = "segmented.rs"]
+mod segmented;
+
+#[cfg(test)]
+#[path = "dynamic_tests.rs"]
+mod dynamic_tests;
 use tracing::{error, info, warn};
 
 /// Resolve the scratch directory for a download's partial segment files,
@@ -294,14 +301,14 @@ impl DownloadTask {
             }
             
             // Save segments to DB
-            self.db.upsert_download(&self.download).await?;
+            self.db.save_transfer(&self.download).await?;
             
-            // Emit update event so UI gets size and final URL
-            let _ = self.event_tx.send(CoreEvent::DownloadUpdated {
-                download: self.download.clone(),
-            });
+            // Emit update event so UI gets size and final URL.
+            self.publish_range_map().await?;
         }
         
+        self.reconcile_segments().await?;
+
         // Check if all segments are already complete (resuming a finished-but-not-merged download)
         let all_complete = self.download.segments.iter().all(|s| s.complete);
         
@@ -309,7 +316,7 @@ impl DownloadTask {
             info!("All segments already complete, skipping to merge");
         } else {
             // Spawn segment workers for incomplete segments
-            let result = if self.download.segments.len() == 1 {
+            let result = if self.download.segments.len() == 1 && !self.can_rebalance() {
                 self.download_single_segment().await
             } else {
                 self.download_multi_segment().await
@@ -317,9 +324,14 @@ impl DownloadTask {
             
             // Handle download result (pause/cancel)
             if let Err(e) = result {
+                let e = if matches!(e, DlmanError::Paused) && !self.paused.load(Ordering::Acquire)
+                    && self.cancelled.load(Ordering::Acquire) { DlmanError::Cancelled } else { e };
                 if matches!(e, DlmanError::Paused) {
                     info!("Download paused: {}", self.download.filename);
-                    // Status already updated by pause command
+                    // Status already updated by pause command; persist it here too
+                    // for callers that control the task flags directly.
+                    self.db.update_download_status(self.download.id, DownloadStatus::Paused, None).await?;
+                    self.emit_status_change(DownloadStatus::Paused, None).await;
                     return Ok(());
                 } else if matches!(e, DlmanError::Cancelled) {
                     info!("Download cancelled: {}", self.download.filename);
@@ -352,7 +364,21 @@ impl DownloadTask {
         
         // All segments complete - merge into final file
         info!("All segments complete, merging...");
-        let segment_sizes = self.merge_segments().await?;
+        let segment_sizes = match self.merge_segments().await {
+            Ok(sizes) => sizes,
+            Err(DlmanError::Paused) => {
+                self.cancelled.store(true, Ordering::Release);
+                self.db.update_download_status(self.download.id, DownloadStatus::Paused, None).await?;
+                self.emit_status_change(DownloadStatus::Paused, None).await;
+                return Ok(());
+            }
+            Err(DlmanError::Cancelled) => {
+                self.db.update_download_status(self.download.id, DownloadStatus::Cancelled, None).await?;
+                self.emit_status_change(DownloadStatus::Cancelled, None).await;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         
         // Update segments with actual file sizes and calculate total downloaded
         let mut total_downloaded: u64 = 0;
@@ -377,11 +403,15 @@ impl DownloadTask {
         
         // Update status to completed
         self.download.status = DownloadStatus::Completed;
+        self.download.completed_at = Some(chrono::Utc::now());
         self.download.downloaded = total_downloaded.max(self.download.size.unwrap_or(0));
         
         // Save the updated download with correct size info
-        self.db.upsert_download(&self.download).await?;
+        self.db.save_transfer(&self.download).await?;
         self.db.update_download_status(self.download.id, DownloadStatus::Completed, None).await?;
+        self.cleanup_segments().await;
+        // Reload metadata edited during transfer before publishing the final snapshot.
+        if let Some(saved) = self.db.load_download(self.download.id).await? { self.download = saved; }
         self.emit_status_change(DownloadStatus::Completed, None).await;
         
         // Emit final download update so UI shows all segments complete
@@ -428,12 +458,13 @@ impl DownloadTask {
         let result = worker.run().await;
         
         // Stop progress reporter
-        self.cancelled.store(true, Ordering::Release);
+        progress_handle.abort();
         let _ = progress_handle.await;
         
         // Handle result - update size if discovered
         match result {
             Ok(segment_result) => {
+                self.download.segments = vec![segment_result.segment];
                 if let Some(size) = segment_result.discovered_size {
                     self.download.size = Some(size);
                     // Also update the segment end value so it's no longer u64::MAX
@@ -441,170 +472,18 @@ impl DownloadTask {
                         self.download.segments[0].end = size.saturating_sub(1);
                         self.download.segments[0].downloaded = size;
                     }
-                    self.db.upsert_download(&self.download).await?;
+                    self.db.save_transfer(&self.download).await?;
                     let _ = self.event_tx.send(CoreEvent::DownloadUpdated {
                         download: self.download.clone(),
                     });
                     info!("Updated download size to {} bytes (discovered during download)", size);
                 }
+                self.download.downloaded = self.total_downloaded.load(Ordering::Acquire);
+                self.db.save_transfer(&self.download).await?;
                 Ok(())
             }
             Err(e) => Err(e),
         }
-    }
-    
-    /// Download with multiple parallel segments
-    async fn download_multi_segment(&self) -> Result<(), DlmanError> {
-        let mut retry_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-        
-        // Start progress reporter
-        let progress_handle = self.spawn_progress_reporter();
-        
-        // Segments that need to be downloaded (initially, all incomplete ones)
-        let mut segments_to_download: Vec<Segment> = self.download.segments
-            .iter()
-            .filter(|s| !s.complete)
-            .cloned()
-            .collect();
-        
-        if segments_to_download.is_empty() {
-            // All segments already complete
-            self.cancelled.store(true, Ordering::Release);
-            let _ = progress_handle.await;
-            return Ok(());
-        }
-        
-        // Main retry loop
-        loop {
-            if segments_to_download.is_empty() {
-                break;
-            }
-            
-            let mut join_set = JoinSet::new();
-            
-            // Use the original request URL for each segment. Redirect handling
-            // scopes credentials and cookies to that original request origin.
-            let url = self.effective_url().to_string();
-            
-            // Spawn a worker for each segment that needs downloading
-            for segment in &segments_to_download {
-                let worker = SegmentWorker::new_with_credentials(
-                    self.download.id,
-                    segment.clone(),
-                    url.clone(),
-                    self.temp_dir.clone(),
-                    self.client.clone(),
-                    self.rate_limiter.clone(),
-                    self.db.clone(),
-                    self.event_tx.clone(),
-                    self.paused.clone(),
-                    self.cancelled.clone(),
-                    self.total_downloaded.clone(),
-                    self.credentials.clone(),
-                    self.download.cookies.clone(),
-                ).with_http_context(self.download.size, self.download.etag.clone(), self.download.source_page_url.clone(), super::refresh::expects_html(&self.download.filename));
-                
-                let segment_index = segment.index;
-                join_set.spawn(async move { 
-                    let result = worker.run().await;
-                    (segment_index, result)
-                });
-            }
-            
-            // Track failed segments for retry
-            let mut failed_segments: Vec<Segment> = Vec::new();
-            let mut was_paused = false;
-            let mut was_cancelled = false;
-            
-            // Wait for all segments to complete
-            while let Some(result) = join_set.join_next().await {
-                match result {
-                    Ok((segment_idx, Ok(segment_result))) => {
-                        info!("Segment {} completed", segment_idx);
-                        // Note: For multi-segment, size should already be known
-                        // but if somehow discovered, we could update here
-                        if segment_result.discovered_size.is_some() {
-                            info!("Segment {} discovered size (unusual for multi-segment)", segment_idx);
-                        }
-                    }
-                    Ok((segment_idx, Err(DlmanError::Paused))) => {
-                        info!("Segment {} paused", segment_idx);
-                        self.paused.store(true, Ordering::Release);
-                        was_paused = true;
-                    }
-                    Ok((segment_idx, Err(DlmanError::Cancelled))) => {
-                        info!("Segment {} cancelled", segment_idx);
-                        self.cancelled.store(true, Ordering::Release);
-                        was_cancelled = true;
-                    }
-                    Ok((segment_idx, Err(e))) => {
-                        let retry_count = retry_counts.entry(segment_idx).or_insert(0);
-                        *retry_count += 1;
-                        
-                        if *retry_count <= self.max_retries {
-                            warn!("Segment {} failed (attempt {}/{}): {}. Will retry.", 
-                                  segment_idx, retry_count, self.max_retries, e);
-                            // Find the segment to retry
-                            if let Some(seg) = self.download.segments.iter().find(|s| s.index == segment_idx) {
-                                failed_segments.push(seg.clone());
-                            }
-                        } else {
-                            error!("Segment {} failed after {} attempts: {}", segment_idx, self.max_retries, e);
-                            self.cancelled.store(true, Ordering::Release);
-                            let _ = progress_handle.await;
-                            return Err(e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Segment task panicked: {}", e);
-                        self.cancelled.store(true, Ordering::Release);
-                        let _ = progress_handle.await;
-                        return Err(DlmanError::Unknown(format!("Segment task panicked: {}", e)));
-                    }
-                }
-            }
-            
-            // Check for pause/cancel
-            if was_paused {
-                self.cancelled.store(true, Ordering::Release);
-                let _ = progress_handle.await;
-                return Err(DlmanError::Paused);
-            }
-            
-            if was_cancelled {
-                self.cancelled.store(true, Ordering::Release);
-                let _ = progress_handle.await;
-                return Err(DlmanError::Cancelled);
-            }
-            
-            // Prepare for retry if there are failed segments
-            if !failed_segments.is_empty() {
-                info!("Retrying {} failed segments after {} seconds delay...", 
-                      failed_segments.len(), self.retry_delay_secs);
-                tokio::time::sleep(tokio::time::Duration::from_secs(self.retry_delay_secs as u64)).await;
-                
-                // Check if cancelled during delay
-                if self.cancelled.load(Ordering::Acquire) {
-                    let _ = progress_handle.await;
-                    return Err(DlmanError::Cancelled);
-                }
-                if self.paused.load(Ordering::Acquire) {
-                    let _ = progress_handle.await;
-                    return Err(DlmanError::Paused);
-                }
-                
-                segments_to_download = failed_segments;
-            } else {
-                // All segments completed successfully
-                segments_to_download.clear();
-            }
-        }
-        
-        // Stop progress reporter
-        self.cancelled.store(true, Ordering::Release);
-        let _ = progress_handle.await;
-        
-        Ok(())
     }
     
     /// Spawn a background task to report progress periodically
@@ -843,114 +722,110 @@ impl DownloadTask {
         segments
     }
     
-    /// Merge all segment temp files into the final file
-    /// Returns a vector of actual sizes for each segment (useful for unknown-size downloads)
-    async fn merge_segments(&self) -> Result<Vec<u64>, DlmanError> {
+    /// Reconcile retained files before counters, scheduling, or merge use them.
+    async fn reconcile_segments(&mut self) -> Result<(), DlmanError> {
+        super::segmentation::validate_map(&self.download.segments, self.download.size, false)?;
+        let mut total = 0u64;
+        for segment in &mut self.download.segments {
+            let path = self.temp_dir.join(format!("{}_segment_{}.part", self.download.id, segment.index));
+            let length = match tokio::fs::metadata(&path).await {
+                Ok(metadata) if metadata.is_file() => metadata.len(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                    && segment.downloaded == 0 && !segment.complete => 0,
+                _ => return Err(super::refresh::invalid("Required partial segment files are missing or unreadable.")),
+            };
+            if length < segment.downloaded || (!segment.is_unknown_size() && length > segment.size()) {
+                return Err(super::refresh::invalid("Partial segment length is inconsistent; file was preserved."));
+            }
+            segment.downloaded = length;
+            if !segment.is_unknown_size() {
+                segment.complete = length == segment.size();
+            }
+            self.db.update_segment_progress(self.download.id, segment.index, length, segment.complete).await?;
+            total = total.checked_add(length).ok_or_else(|| super::refresh::invalid("Invalid partial segment size."))?;
+        }
+        self.download.downloaded = total;
+        self.total_downloaded.store(total, Ordering::Release);
+        self.db.update_download_progress(self.download.id, total).await?;
+        Ok(())
+    }
+
+    /// Merge all segment temp files into the final file.
+    /// Returns actual sizes in the same byte order as self.download.segments.
+    async fn merge_segments(&mut self) -> Result<Vec<u64>, DlmanError> {
+        let result = self.assemble_segments().await;
+        if result.is_err() {
+            let staging = self.download.destination.join(format!(".{}.assembling", self.download.id));
+            let _ = tokio::fs::remove_file(staging).await;
+        }
+        result
+    }
+
+    async fn assemble_segments(&mut self) -> Result<Vec<u64>, DlmanError> {
+        self.download.segments.sort_by_key(|segment| segment.start);
+        super::segmentation::validate_map(&self.download.segments, self.download.size, true)?;
         let final_path = self.download.destination.join(&self.download.filename);
-        
-        info!("Merging {} segments into {:?}", self.download.segments.len(), final_path);
-        
-        // First, verify all temp files exist and collect their sizes
-        let mut segment_sizes: Vec<u64> = Vec::with_capacity(self.download.segments.len());
+        let mut segment_sizes = Vec::with_capacity(self.download.segments.len());
         for segment in &self.download.segments {
-            let temp_path = self.temp_dir.join(format!(
-                "{}_segment_{}.part",
-                self.download.id, segment.index
-            ));
-            
-            if !temp_path.exists() {
-                error!("Segment temp file missing: {:?} - download corrupted", temp_path);
-                return Err(DlmanError::Unknown(format!(
-                    "Segment {} temp file missing - download may be corrupted. Delete and restart.",
-                    segment.index
-                )));
+            let path = self.temp_dir.join(format!("{}_segment_{}.part", self.download.id, segment.index));
+            let length = tokio::fs::metadata(path).await?.len();
+            if length != segment.downloaded || (!segment.is_unknown_size() && length != segment.size()) {
+                return Err(super::refresh::invalid("Partial segment length is inconsistent; file was preserved."));
             }
-            
-            // Get actual file size
-            let metadata = tokio::fs::metadata(&temp_path).await?;
-            let file_size = metadata.len();
-            segment_sizes.push(file_size);
-            
-            info!("Segment {} temp file verified: {:?} (size: {} bytes)", segment.index, temp_path, file_size);
+            segment_sizes.push(length);
         }
-        
-        // Ensure destination directory exists
-        if let Err(e) = tokio::fs::create_dir_all(&self.download.destination).await {
-            error!("Failed to create destination directory {:?}: {}", self.download.destination, e);
-            return Err(DlmanError::Io(e));
-        }
-        
-        // Create or truncate final file
-        info!("Creating final file: {:?}", final_path);
-        let mut output = match OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&final_path)
-            .await {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("Failed to create final file {:?}: {}", final_path, e);
-                    return Err(DlmanError::Io(e));
-                }
-            };
-        
-        // Copy each segment in order
+        tokio::fs::create_dir_all(&self.download.destination).await?;
+        // Staging is on the destination volume. Its unique name cannot collide
+        // with another download, and no partial is removed until publication.
+        let staging = self.download.destination.join(format!(".{}.assembling", self.download.id));
+        let mut output = OpenOptions::new().create(true).write(true).truncate(true).open(&staging).await?;
         for segment in &self.download.segments {
-            let temp_path = self.temp_dir.join(format!(
-                "{}_segment_{}.part",
-                self.download.id, segment.index
-            ));
-            
-            info!("Copying segment {} from {:?}", segment.index, temp_path);
-            
-            // Temp file should exist (we checked above), but handle gracefully
-            let mut input = match File::open(&temp_path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("Failed to open temp file {:?}: {}", temp_path, e);
-                    return Err(DlmanError::Io(e));
-                }
-            };
+            self.check_assembly_control()?;
+            let path = self.temp_dir.join(format!("{}_segment_{}.part", self.download.id, segment.index));
+            let mut input = File::open(path).await?;
             let mut buffer = vec![0u8; 1024 * 1024]; // 1MB buffer
-            
+            let mut copied = 0u64;
             loop {
-                let n = match input.read(&mut buffer).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        error!("Failed to read from temp file {:?}: {}", temp_path, e);
-                        return Err(DlmanError::Io(e));
-                    }
-                };
-                if n == 0 {
-                    break;
-                }
-                if let Err(e) = output.write_all(&buffer[..n]).await {
-                    error!("Failed to write to final file {:?}: {}", final_path, e);
-                    return Err(DlmanError::Io(e));
-                }
+                self.check_assembly_control()?;
+                let length = input.read(&mut buffer).await?;
+                if length == 0 { break; }
+                output.write_all(&buffer[..length]).await?;
+                copied += length as u64;
             }
-            
-            info!("Segment {} copied successfully", segment.index);
-            
-            // Delete temp file
-            if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                warn!("Failed to remove temp file {:?}: {}", temp_path, e);
+            if copied != segment.downloaded {
+                return Err(super::refresh::invalid("Partial segment changed during assembly; files were preserved."));
             }
         }
-        
         output.flush().await?;
         output.sync_all().await?;
+        drop(output);
+        self.check_assembly_control()?;
+        tokio::fs::rename(&staging, &final_path).await?;
+        Ok(segment_sizes)
+    }
 
+    async fn cleanup_segments(&self) {
+        for segment in &self.download.segments {
+            let path = self.temp_dir.join(format!("{}_segment_{}.part", self.download.id, segment.index));
+            if let Err(error) = tokio::fs::remove_file(&path).await {
+                warn!("Failed to remove temp file {:?}: {}", path, error);
+            }
+        }
         // Best-effort: remove the scratch dir now that this download's parts are
         // merged. remove_dir only succeeds if empty, so concurrent downloads
         // sharing the destination's cache are left untouched.
         let _ = tokio::fs::remove_dir(&self.temp_dir).await;
-
-        info!("Merge complete: {:?}", final_path);
-        Ok(segment_sizes)
     }
-    
+
+    fn check_assembly_control(&self) -> Result<(), DlmanError> {
+        if self.paused.load(Ordering::Acquire) {
+            self.cancelled.store(true, Ordering::Release);
+            return Err(DlmanError::Paused);
+        }
+        if self.cancelled.load(Ordering::Acquire) { return Err(DlmanError::Cancelled); }
+        Ok(())
+    }
+
     /// Pause the download
     pub fn pause(&self) {
         self.paused.store(true, Ordering::Release);
