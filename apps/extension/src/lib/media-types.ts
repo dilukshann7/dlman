@@ -1,4 +1,5 @@
 import type { YoutubeSelection } from "../../../../shared/youtube.mjs";
+import type { WebMediaSelection, WebMediaQualityHint } from "../../../../shared/web-media.mjs";
 /**
  * Media detection types — mirrors dlman-types Rust structs.
  *
@@ -17,6 +18,11 @@ export type MediaProtocol = 'direct' | 'hls' | 'dash' | 'youtube';
 
 /** A single quality/variant of a detected media stream */
 export interface MediaVariant {
+  /** Parent manifest retains external audio groups for a parsed HLS rendition. */
+  master_url?: string;
+  protocol?: MediaProtocol;
+  web_media_selection?: WebMediaSelection;
+  fps?: number;
   youtube_selection?: YoutubeSelection;
   /** URL of this variant's manifest or direct file */
   url: string;
@@ -52,7 +58,11 @@ export interface DetectedMedia {
   /** The master/top-level URL of the stream */
   master_url: string;
   /** Protocol (direct, hls, dash) */
-  protocol: MediaProtocol;
+  /** webpage is an extension overlay state, never sent to the stream-download API. */
+  protocol: MediaProtocol | 'webpage';
+  discovery_status?: 'detecting' | 'deferred' | 'ready' | 'failed';
+  discovery_error?: string;
+  extraction_url?: string;
   /** Available quality variants (empty for direct files before resolution) */
   variants: MediaVariant[];
   /** Detected MIME type */
@@ -77,6 +87,8 @@ export interface DetectedMedia {
 
 /** Request from extension to download a media stream */
 export interface MediaDownloadRequest {
+  media_quality?: WebMediaQualityHint;
+  web_media_selection?: WebMediaSelection;
   inspection_id?: string;
   youtube_selection?: YoutubeSelection;
   media: DetectedMedia;

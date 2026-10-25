@@ -11,6 +11,7 @@
  */
 
 import type { DetectedMedia, MediaVariant, MediaDownloadRequest } from './media-types';
+import { playerVisible } from './player-dom';
 
 const OVERLAY_ATTR = 'data-dlman-overlay-id';
 const Z = 2147483647;
@@ -93,10 +94,11 @@ export type OnDownloadRequest = (request: MediaDownloadRequest) => void | Promis
 
 interface Overlay {
   media: DetectedMedia;
-  video: HTMLVideoElement | null;
+  video: HTMLElement | null;
   host: HTMLElement;
   shadow: ShadowRoot;
   pill: HTMLElement;
+  label: HTMLElement;
   dropdown: HTMLElement | null;
   rafId: number | null;
   outsideListener: ((e: MouseEvent) => void) | null;
@@ -118,11 +120,13 @@ export class VideoOverlayManager {
 
   // ---------- Public API ----------
 
-  addOverlay(media: DetectedMedia, variants?: MediaVariant[], targetVideo?: HTMLVideoElement): void {
+  addOverlay(media: DetectedMedia, variants?: MediaVariant[], targetVideo?: HTMLElement): void {
     if (dismissed.has(media.id)) return;
     if (this.overlays.has(media.id)) {
       const o = this.overlays.get(media.id)!;
-      if (variants?.length) o.media = { ...media, variants };
+      o.media = variants ? { ...media, variants } : media;
+      this.closeDropdown(o);
+      this.renderState(o);
       return;
     }
 
@@ -143,6 +147,11 @@ export class VideoOverlayManager {
     // Build pill: [Logo] Download Video [▾]  (×)
     const pill = document.createElement('div');
     pill.className = 'pill';
+    pill.setAttribute('role', 'button');
+    pill.tabIndex = 0;
+    pill.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pill.click(); }
+    });
 
     // Logo badge
     const logo = document.createElement('div');
@@ -161,6 +170,7 @@ export class VideoOverlayManager {
     // Chevron (multi-quality indicator)
     if (hasMulti) {
       const chev = document.createElement('span');
+      chev.dataset.qualityChevron = 'true';
       chev.innerHTML = chevSvg();
       pill.appendChild(chev);
     }
@@ -170,10 +180,10 @@ export class VideoOverlayManager {
       e.stopPropagation();
       e.preventDefault();
       const current = this.overlays.get(media.id);
-      if (!current || pill.dataset.loading) return;
+      if (!current || pill.dataset.loading || ['detecting', 'deferred'].includes(current.media.discovery_status || '')) return;
       if (current.dropdown) { this.closeDropdown(current); return; }
       try {
-        if (current.media.protocol === 'youtube' && this.resolveMedia) {
+        if (['youtube', 'webpage'].includes(current.media.protocol) && this.resolveMedia) {
           pill.dataset.loading = 'true'; label.textContent = 'Loading…';
           const resolved = await this.resolveMedia(current.media);
           if (this.overlays.get(media.id) !== current || !current.video?.isConnected) return;
@@ -208,6 +218,7 @@ export class VideoOverlayManager {
       host,
       shadow,
       pill,
+      label,
       dropdown: null,
       rafId: null,
       outsideListener: null,
@@ -218,7 +229,24 @@ export class VideoOverlayManager {
     requestAnimationFrame(() => pill.classList.add('show'));
 
     this.overlays.set(media.id, overlay);
+    this.renderState(overlay);
     video.setAttribute(OVERLAY_ATTR, media.id);
+  }
+
+  private renderState(overlay: Overlay): void {
+    const detecting = ['detecting', 'deferred'].includes(overlay.media.discovery_status || '');
+    overlay.pill.setAttribute('aria-disabled', String(detecting));
+    overlay.pill.style.cursor = detecting ? 'wait' : 'pointer';
+    overlay.label.textContent = detecting ? 'Detecting video…'
+      : overlay.media.discovery_status === 'failed' ? 'Retry' : 'Download Video';
+    overlay.pill.title = overlay.media.discovery_error || '';
+    let chevron = overlay.pill.querySelector<HTMLElement>('[data-quality-chevron]');
+    if (overlay.media.variants.length > 1 && !chevron) {
+      chevron = document.createElement('span');
+      chevron.dataset.qualityChevron = 'true'; chevron.innerHTML = chevSvg();
+      overlay.pill.appendChild(chevron);
+    }
+    if (chevron) chevron.style.display = overlay.media.variants.length > 1 ? '' : 'none';
   }
 
   removeOverlay(id: string): void {
@@ -227,6 +255,13 @@ export class VideoOverlayManager {
       this.cleanup(o);
       this.overlays.delete(id);
     }
+  }
+
+  setVisibility(id: string, visible: boolean): void {
+    const overlay = this.overlays.get(id);
+    if (!overlay?.video) return;
+    if (visible) this.positionFixed(overlay.host, overlay.video);
+    else { overlay.host.style.display = 'none'; this.closeDropdown(overlay); }
   }
 
   destroy(): void {
@@ -249,9 +284,10 @@ export class VideoOverlayManager {
     }
   }
 
-  private positionFixed(host: HTMLElement, video: HTMLVideoElement): void {
+  private positionFixed(host: HTMLElement, video: HTMLElement): void {
+    if (!playerVisible(video)) { host.style.display = 'none'; return; }
     const vr = video.getBoundingClientRect();
-    if (vr.bottom < 0 || vr.top > window.innerHeight || vr.right < 0 || vr.left > window.innerWidth) {
+    if (!video.isConnected || vr.width <= 0 || vr.height <= 0 || vr.bottom < 0 || vr.top > window.innerHeight || vr.right < 0 || vr.left > window.innerWidth) {
       host.style.display = 'none';
       return;
     }
@@ -324,6 +360,7 @@ export class VideoOverlayManager {
       if (v.codecs) parts.push(v.codecs.split(',')[0]);
       if (v.estimated_size) parts.push(fmtSize(v.estimated_size));
       if (v.bandwidth) parts.push(fmtBitrate(v.bandwidth));
+      if (v.fps) parts.push(v.fps + ' fps');
       meta.textContent = parts.join(' · ');
 
       item.appendChild(lbl);
@@ -374,8 +411,13 @@ export class VideoOverlayManager {
 
   private async doDownload(media: DetectedMedia, variants?: MediaVariant[], idx?: number): Promise<void> {
     const selected = variants?.[idx ?? 0];
-    await this.onDownload({ media: variants ? { ...media, variants } : media, variant_index: idx,
-      inspection_id: media.inspection_id, youtube_selection: selected?.youtube_selection });
+    const selectedMedia = !['youtube', 'webpage'].includes(media.protocol) && selected
+      ? { ...media, master_url: selected.master_url || selected.url, protocol: selected.protocol || media.protocol } : media;
+    await this.onDownload({ media: variants ? { ...selectedMedia, variants } : selectedMedia, variant_index: idx,
+      inspection_id: media.inspection_id, youtube_selection: selected?.youtube_selection,
+      web_media_selection: selected?.web_media_selection,
+      ...(selected?.master_url ? { media_quality: { label: selected.label, height: selected.height,
+        fps: selected.fps ? Math.round(selected.fps) : undefined } } : {}) });
   }
 
   /** Download every variant — fires a separate request for each quality */
@@ -398,23 +440,14 @@ export class VideoOverlayManager {
         if ((s as HTMLSourceElement).src && this.urlMatch((s as HTMLSourceElement).src, media.master_url)) return el;
       }
     }
-    let best: HTMLVideoElement | null = null;
-    let area = 0;
-    for (const v of document.querySelectorAll('video')) {
-      const el = v as HTMLVideoElement;
-      if (el.getAttribute(OVERLAY_ATTR)) continue;
-      const r = el.getBoundingClientRect();
-      const a = r.width * r.height;
-      if (a > area && r.width > 200 && r.height > 120) { area = a; best = el; }
-    }
-    return best;
+    return null;
   }
 
   private urlMatch(a: string, b: string): boolean {
     try {
       const ua = new URL(a);
       const ub = new URL(b);
-      return ua.origin === ub.origin && ua.pathname === ub.pathname;
+      return ua.href === ub.href;
     } catch { return a === b; }
   }
 

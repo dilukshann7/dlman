@@ -11,6 +11,8 @@ import { defineContentScript } from 'wxt/sandbox';
  */
 export default defineContentScript({
   matches: ['<all_urls>'],
+  allFrames: true,
+  matchAboutBlank: true,
   runAt: 'document_start',
   
   main() {
@@ -18,7 +20,14 @@ export default defineContentScript({
       const script = document.createElement('script');
       script.src = new URL('media-hook.js', browser.runtime.getURL('/')).href;
       script.onload = () => script.remove();
-      (document.head || document.documentElement).appendChild(script);
+      const inject = () => (document.head || document.documentElement)?.appendChild(script);
+      if (document.documentElement) inject();
+      else {
+        const observer = new MutationObserver(() => {
+          if (document.documentElement) { observer.disconnect(); inject(); }
+        });
+        observer.observe(document, { childList: true });
+      }
     } catch {
       // Silently fail — some pages may block script injection (CSP)
     }

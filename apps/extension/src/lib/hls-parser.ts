@@ -85,6 +85,9 @@ export function parseMasterPlaylist(content: string, baseUrl: string): MediaVari
     const [width, height] = resolution ? parseResolution(resolution) : [undefined, undefined];
 
     variants.push({
+      master_url: baseUrl,
+      protocol: 'hls',
+      fps: Number(parseAttr(attrs, 'FRAME-RATE')) || undefined,
       url: variantUrl,
       label: buildLabel(height, bw),
       width,

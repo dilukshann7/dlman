@@ -1,190 +1,143 @@
 /**
- * MAIN-world media interception hooks.
- *
- * This script is injected into the page's MAIN world (not the extension's
- * isolated content script world) so it can intercept the page's own
- * `fetch()`, `XMLHttpRequest`, and `MediaSource` / `SourceBuffer` calls.
- *
- * What it intercepts:
- * 1. `fetch()` — catches m3u8/mpd manifest requests that webRequest may miss
- * 2. `XMLHttpRequest` — same, for legacy players
- * 3. `URL.createObjectURL(MediaSource)` — maps blob: URLs back to their MediaSource
- * 4. `SourceBuffer.appendBuffer()` — detects MIME types being fed to MSE
- *
- * Communication:
- *   This script runs in the PAGE world, so it cannot use browser.runtime APIs.
- *   Instead it uses `window.postMessage()` to send detected URLs to the
- *   content script, which runs in the ISOLATED world and forwards to background.
- *
- * WHY THIS IS NEEDED:
- *   - `webRequest` sees network requests but NOT JavaScript-constructed fetch()
- *     calls that some players make from within the page context.
- *   - Sites like YouTube, Aparat, and others generate manifest URLs dynamically
- *     via JavaScript fetch(), which webRequest *does* see. BUT some sites use
- *     service workers or construct requests in ways that webRequest misses.
- *   - `URL.createObjectURL(mediaSource)` creates blob: URLs that are invisible
- *     to webRequest entirely. This hook tracks them.
+ * MAIN-world interception. This source is bundled once as an unlisted WXT entry.
+ * It observes successful page requests and MSE ownership, never starts playback.
  */
+import { classifyMediaCandidate } from '../../../../shared/media-policy.mjs';
 
-const DLMAN_HOOK_ID = '__dlman_media_hook__';
-
-// Prevent double-injection
-if (!(window as any)[DLMAN_HOOK_ID]) {
-  (window as any)[DLMAN_HOOK_ID] = true;
-
-  const HLS_PATTERN = /\.m3u8(\?|#|$)/i;
-  const DASH_PATTERN = /\.mpd(\?|#|$)/i;
-  const VIDEO_PATTERN = /\.(mp4|webm|mkv|mov|m4v|flv)(\?|#|$)/i;
-  const MANIFEST_MIMES = /mpegurl|dash\+xml/i;
-  const VIDEO_MIMES = /^video\//i;
-  const AD_DOMAINS = /doubleclick\.net|googlesyndication|googleadservices|facebook\.com\/tr|analytics|adserver|adsystem|sabavision\.com|imasdk\.googleapis|moatads|serving-sys\.com/i;
-
-  // Already-sent URLs (deduplicate)
-  const sent = new Set<string>();
-
-  function urlBase(url: string): string {
-    try {
-      const u = new URL(url, location.href);
-      return u.origin + u.pathname;
-    } catch {
-      return url;
+interface Evidence { url: string; protocol: 'direct' | 'hls' | 'dash'; blobUrl?: string }
+export function installMediaHook(): void {
+  const state = window as Window & { __dlman_media_hook__?: boolean };
+  if (state.__dlman_media_hook__) return;
+  state.__dlman_media_hook__ = true;
+  const replay = new Map<string, Evidence>();
+  const buffers = new WeakMap<object, Evidence>();
+  const responseSources = new WeakMap<Response, Evidence>();
+  const parents = new Map<string, Evidence>();
+  const sourceBlobs = new WeakMap<MediaSource, string>();
+  const sourceBuffers = new WeakMap<SourceBuffer, MediaSource>();
+  let page = location.href;
+  const emit = (evidence: Evidence) => {
+    if (page !== location.href) { replay.clear(); parents.clear(); page = location.href; }
+    const key = evidence.url + ':' + (evidence.blobUrl || '');
+    if (replay.has(key)) return;
+    replay.set(key, evidence);
+    if (replay.size > 64) replay.delete(replay.keys().next().value!);
+    window.postMessage({ source: 'dlman-media-hook', type: 'media-url-detected', ...evidence }, '*');
+  };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || event.data?.source !== 'dlman-content' || event.data.type !== 'media-hook-ready') return;
+    if (page !== location.href) { replay.clear(); parents.clear(); page = location.href; }
+    for (const evidence of replay.values()) window.postMessage({ source: 'dlman-media-hook', type: 'media-url-detected', ...evidence }, '*');
+  });
+  const rememberPlaylist = (text: string, url: string, evidence: Evidence) => {
+    if (text.length > 524288 || !text.includes('#EXTM3U')) return;
+    for (const line of text.split(/\r?\n/)) {
+      const value = line.trim();
+      if (!value || value.startsWith('#')) continue;
+      try {
+        if (parents.size < 512) parents.set(new URL(value, url).href, evidence);
+      } catch { /* Invalid playlist reference. */ }
     }
-  }
-
-  function classify(url: string, mime?: string): string | null {
-    if (AD_DOMAINS.test(url)) return null;
-    if (HLS_PATTERN.test(url) || (mime && MANIFEST_MIMES.test(mime) && mime.includes('mpegurl'))) return 'hls';
-    if (DASH_PATTERN.test(url) || (mime && MANIFEST_MIMES.test(mime) && mime.includes('dash'))) return 'dash';
-    if (VIDEO_PATTERN.test(url) || (mime && VIDEO_MIMES.test(mime))) return 'direct';
-    return null;
-  }
-
-  function emit(url: string, protocol: string) {
-    // Skip localhost, data:, blob: (blob is handled separately)
-    if (!url || url.startsWith('blob:') || url.startsWith('data:')) return;
-    if (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1')) return;
-
-    const key = urlBase(url);
-    if (sent.has(key)) return;
-    sent.add(key);
-
-    window.postMessage({
-      source: 'dlman-media-hook',
-      type: 'media-url-detected',
-      url,
-      protocol,
-    }, '*');
-  }
-
-  // =========================================================================
-  // 1. Hook fetch()
-  // =========================================================================
-
+  };
+  const readPlaylist = async (response: Response, url: string, evidence: Evidence) => {
+    const reader = response.body?.getReader();
+    if (!reader) return;
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > 524288) { void reader.cancel().catch(() => {}); return; }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      rememberPlaylist(new TextDecoder().decode(bytes), url, evidence);
+    } finally { reader.releaseLock(); }
+  };
   const originalFetch = window.fetch;
-  window.fetch = function (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
-    let url: string | undefined;
-    try {
-      if (typeof input === 'string') {
-        url = new URL(input, location.href).toString();
-      } else if (input instanceof URL) {
-        url = input.toString();
-      } else if (input instanceof Request) {
-        url = input.url;
-      }
-    } catch { /* ignore */ }
-
-    if (url) {
-      const proto = classify(url);
-      if (proto) emit(url, proto);
-    }
-
-    // Call original and also check response content-type
-    return originalFetch.apply(this, arguments as any).then((resp) => {
-      if (url && resp.ok) {
-        const ct = resp.headers.get('content-type');
-        if (ct) {
-          const proto = classify(url, ct);
-          if (proto) emit(url, proto);
+  window.fetch = function (...args: Parameters<typeof fetch>): Promise<Response> {
+    return originalFetch.apply(this, args).then((response) => {
+      try {
+        if (!response.ok) return response;
+        const input = args[0];
+        const url = response.url || new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href).href;
+        const candidate = classifyMediaCandidate({ url, mime: response.headers.get('content-type') || undefined });
+        const evidence = parents.get(url) || candidate;
+        if (evidence) responseSources.set(response, evidence);
+        if (candidate) {
+          emit(candidate);
+          if (candidate.protocol === 'hls') {
+            void readPlaylist(response.clone(), url, evidence!).catch(() => {});
+          }
         }
-      }
-      return resp;
+      } catch { /* Interception must not alter successful page fetches. */ }
+      return response;
     });
   };
-
-  // =========================================================================
-  // 2. Hook XMLHttpRequest
-  // =========================================================================
-
-  const XHRProto = XMLHttpRequest.prototype;
-  const originalOpen = XHRProto.open;
-  const originalSend = XHRProto.send;
-
-  XHRProto.open = function (method: string, url: string | URL, ...rest: any[]) {
-    try {
-      const resolved = new URL(typeof url === 'string' ? url : url.toString(), location.href).toString();
-      (this as any).__dlman_url = resolved;
-      const proto = classify(resolved);
-      if (proto) emit(resolved, proto);
-    } catch { /* ignore */ }
+  // Track which complete stream supplied a buffer, rather than guessing which
+  // player a request belongs to from timing, dimensions or DOM order.
+  const originalArrayBuffer = Response.prototype.arrayBuffer;
+  const originalClone = Response.prototype.clone;
+  Response.prototype.arrayBuffer = function () {
+    return originalArrayBuffer.call(this).then((buffer) => {
+      const evidence = responseSources.get(this);
+      if (evidence) buffers.set(buffer, evidence);
+      return buffer;
+    });
+  };
+  Response.prototype.clone = function () {
+    const clone = originalClone.call(this), evidence = responseSources.get(this);
+    if (evidence) responseSources.set(clone, evidence);
+    return clone;
+  };
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+  const xhrUrls = new WeakMap<XMLHttpRequest, string>();
+  XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: any[]) {
+    try { xhrUrls.set(this, new URL(String(url), location.href).href); } catch { /* Keep normal XHR behavior. */ }
     return originalOpen.apply(this, [method, url, ...rest] as any);
   };
-
-  XHRProto.send = function (_body?: Document | XMLHttpRequestBodyInit | null) {
-    this.addEventListener('load', function () {
-      const url = (this as any).__dlman_url;
-      if (!url) return;
-      const ct = this.getResponseHeader('content-type');
-      if (ct) {
-        const proto = classify(url, ct);
-        if (proto) emit(url, proto);
-      }
+  XMLHttpRequest.prototype.send = function (...args) {
+    this.addEventListener('load', () => {
+      try {
+        if (this.status < 200 || this.status >= 300) return;
+        const url = this.responseURL || xhrUrls.get(this);
+        if (!url) return;
+        const candidate = classifyMediaCandidate({ url, mime: this.getResponseHeader('content-type') || undefined });
+        const evidence = parents.get(url) || candidate;
+        if (candidate) emit(candidate);
+        if (evidence && this.responseType === 'arraybuffer' && this.response) buffers.set(this.response, evidence);
+        if (candidate?.protocol === 'hls' && (!this.responseType || this.responseType === 'text')) {
+          rememberPlaylist(this.responseText, url, evidence!);
+        }
+      } catch { /* Cross-origin or inaccessible response fields. */ }
     }, { once: true });
-    return originalSend.apply(this, arguments as any);
+    return originalSend.apply(this, args);
   };
-
-  // =========================================================================
-  // 3. Hook URL.createObjectURL — track blob: ↔ MediaSource mapping
-  // =========================================================================
-
-  const originalCreateObjectURL = URL.createObjectURL;
-  const blobMediaSources = new WeakMap<MediaSource, string>();
-
-  URL.createObjectURL = function (obj: Blob | MediaSource): string {
-    const blobUrl = originalCreateObjectURL.call(this, obj);
-    if (obj instanceof MediaSource) {
-      blobMediaSources.set(obj, blobUrl);
-      // Notify that a MSE-powered video exists on this page
-      window.postMessage({
-        source: 'dlman-media-hook',
-        type: 'mse-blob-created',
-        blobUrl,
-        pageUrl: location.href,
-      }, '*');
-    }
-    return blobUrl;
-  };
-
-  // =========================================================================
-  // 4. Hook SourceBuffer.appendBuffer — detect MIME types in use
-  // =========================================================================
-
-  if (typeof MediaSource !== 'undefined') {
-    const originalAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
-
-    MediaSource.prototype.addSourceBuffer = function (mimeType: string): SourceBuffer {
-      const sb = originalAddSourceBuffer.call(this, mimeType);
-
-      // Notify about the MIME type being used (helps identify stream type)
-      window.postMessage({
-        source: 'dlman-media-hook',
-        type: 'mse-source-buffer',
-        mimeType,
-        pageUrl: location.href,
-      }, '*');
-
-      return sb;
+  if (typeof MediaSource !== 'undefined' && typeof SourceBuffer !== 'undefined') {
+    const originalCreate = URL.createObjectURL;
+    URL.createObjectURL = function (object) {
+      const url = originalCreate.call(this, object);
+      if (object instanceof MediaSource) sourceBlobs.set(object, url);
+      return url;
+    };
+    const originalAdd = MediaSource.prototype.addSourceBuffer;
+    MediaSource.prototype.addSourceBuffer = function (mime) {
+      const buffer = originalAdd.call(this, mime);
+      sourceBuffers.set(buffer, this);
+      return buffer;
+    };
+    const originalAppend = SourceBuffer.prototype.appendBuffer;
+    SourceBuffer.prototype.appendBuffer = function (data) {
+      const result = originalAppend.call(this, data);
+      const evidence = buffers.get(data) || (ArrayBuffer.isView(data) ? buffers.get(data.buffer) : undefined);
+      const source = sourceBuffers.get(this), blobUrl = source && sourceBlobs.get(source);
+      if (evidence && blobUrl) emit({ ...evidence, blobUrl });
+      return result;
     };
   }
 }
-
-export {};
