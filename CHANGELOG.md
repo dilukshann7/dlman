@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.13.2] - 2026-10-25
+
+### Added
+
+- Inspect public video webpages and HLS/DASH manifests in the Add Download dialog, choose a quality, and download through the managed media tools.
+- Explicit browser capture for supported webpage videos, with temporary playback context and source selection in the desktop dialog.
+- Earlier extension detection for HTML5, Video.js, JW Player, KVS, and structured video sources, including videos that have not started playing.
+- Anonymous inspection for visible unresolved players, with queued requests and quality handoff to the desktop app.
+
+### Changed
+
+- Share the managed media transfer lifecycle across webpage videos and manifests, retaining destination, category, queue, and selected format.
+- Filter known advertisement sources and transport segments from extension video discovery while retaining legitimate short clips.
+
+### Fixed
+
+- Preserve HLS master playlists and companion audio when handing a selected resolution and frame rate to the desktop app.
+- Keep signed source URLs, alternate qualities, player identity, and overlay visibility consistent during detection and browser capture.
+- Restore the saved window size before showing the startup window, recover legacy empty proxy settings, and register launch at login while preserving saved opt-outs.
+
 ## [1.13.1] - 2026-10-24
 
 ### Fixed

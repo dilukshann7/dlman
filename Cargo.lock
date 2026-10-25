@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "dlman-cli"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "dlman-core"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "dlman-desktop"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "axum",
  "directories",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "dlman-types"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
