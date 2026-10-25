@@ -111,7 +111,7 @@ export function DownloadItem({ download, isFocused = false }: DownloadItemProps)
     ? (download.downloaded / download.size) * 100
     : 0;
   const totalSizeLabel = download.size
-    ? `${download.youtube && download.status !== "completed" ? "~" : ""}${formatBytes(download.size)}`
+    ? `${(download.youtube || download.web_media) && download.status !== "completed" ? "~" : ""}${formatBytes(download.size)}`
     : t('downloadItem.unknown');
 
   // Get effective speed limit for display

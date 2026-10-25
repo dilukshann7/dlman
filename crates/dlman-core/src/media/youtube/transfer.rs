@@ -19,10 +19,28 @@ pub(super) async fn run(
 ) -> Result<(), DlmanError> {
     let tools = core.youtube.tools()?;
     let settings = core.get_settings().await;
-    let session = core
-        .youtube
-        .browser_session(&download.url, job.requires_browser_session)
-        .await?;
+    let web_job: Option<WebMediaJob> = download
+        .web_media
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| media_error("Invalid stored webpage video selection."))?;
+    let web_context = if let Some(web) = &web_job {
+        Some(
+            core.web_media
+                .context_for_job(&download.url, web.source_key.as_deref())
+                .await?,
+        )
+    } else {
+        None
+    };
+    let session = if web_job.is_some() {
+        None
+    } else {
+        core.youtube
+            .browser_session(&download.url, job.requires_browser_session)
+            .await?
+    };
     if session.is_some() && !job.requires_browser_session {
         // A failed anonymous job can be retried after explicit verification of this video.
         // Persist the requirement before using credentials so restart cannot silently downgrade it.
@@ -41,15 +59,25 @@ pub(super) async fn run(
         _ = cancel.cancelled() => return Err(DlmanError::Cancelled),
         permit = core.youtube.slots.acquire() => permit.map_err(|_| media_error("Video inspection service stopped."))?,
     };
-    let value = tools
-        .metadata(
-            &download.url,
-            &settings.proxy,
-            cancel.clone(),
-            session.as_deref(),
-        )
-        .await?;
-    let preview = parse_preview(&download.url, &value)?;
+    let value = if let Some(context) = &web_context {
+        tools
+            .metadata_context(context, &settings.proxy, cancel.clone())
+            .await?
+    } else {
+        tools
+            .metadata(
+                &download.url,
+                &settings.proxy,
+                cancel.clone(),
+                session.as_deref(),
+            )
+            .await?
+    };
+    let preview = if web_job.is_some() {
+        super::parse_web_preview(&download.url, &value)?
+    } else {
+        parse_preview(&download.url, &value)?
+    };
     drop(inspection_slot);
     if !job.selection.matches(&preview) {
         return Err(media_error("The selected quality is no longer available. Add this video again to choose another format."));
@@ -91,8 +119,25 @@ pub(super) async fn run(
     if let Some(cookies) = &cookies {
         args.extend(["--cookies".into(), cookies.path().display().to_string()]);
     }
+    let _web_cookie_file = if let Some(context) = &web_context {
+        let (headers, cookie_file) = context.tool_args()?;
+        args.extend(headers);
+        cookie_file
+    } else {
+        None
+    };
     args.extend(download_args(&job.selection, &job.stage_dir, limit));
-    args.extend(["--".into(), download.url.clone()]);
+    if web_job.is_some() {
+        // A single HLS/TS format also needs a container conversion; merging alone
+        // only changes the container when multiple audio/video inputs are selected.
+        args.extend(["--remux-video".into(), job.selection.container.clone()]);
+    }
+    args.extend([
+        "--".into(),
+        web_context
+            .as_ref()
+            .map_or_else(|| download.url.clone(), |context| context.url.clone()),
+    ]);
     let mut process = ProcessTree::spawn(&tools.yt_dlp, &args)?;
     let stdout = process
         .child
@@ -113,7 +158,7 @@ pub(super) async fn run(
         if !status.success() {
             return Err(process_failure(
                 &diagnostics,
-                "YouTube transfer failed. Partial files were retained; use Retry.",
+                "Video transfer failed. Partial files were retained; use Retry.",
             ));
         }
         Ok(())
@@ -158,11 +203,24 @@ pub(super) async fn run(
         1024 * 1024,
     )
     .await?;
-    verify_streams(
-        &serde_json::from_slice(&probe)
-            .map_err(|_| media_error("Invalid media verification output."))?,
-        job.selection.output_mode,
-    )?;
+    let probe: Value = serde_json::from_slice(&probe)
+        .map_err(|_| media_error("Invalid media verification output."))?;
+    let silent = web_job.is_some()
+        && preview
+            .variants
+            .iter()
+            .any(|variant| variant.id == job.selection.format_id && variant.audio == "none");
+    if silent {
+        if !probe["streams"].as_array().is_some_and(|streams| {
+            streams.len() <= 128 && streams.iter().any(|stream| stream["codec_type"] == "video")
+        }) {
+            return Err(media_error(
+                "Completed media does not contain the selected video stream.",
+            ));
+        }
+    } else {
+        verify_streams(&probe, job.selection.output_mode)?;
+    }
     // Reload destination: paused jobs may be redirected while retaining their original stage.
     download = core.get_download(download.id).await?;
     publish(core, &mut download, &output, cancel).await?;
@@ -361,11 +419,19 @@ async fn progress(
         .youtube
         .clone()
         .and_then(|value| serde_json::from_value::<YoutubeJob>(value).ok());
-    let expected_components = job
+    let web_job = download
+        .web_media
+        .clone()
+        .and_then(|value| serde_json::from_value::<WebMediaJob>(value).ok());
+    let selection = job
         .as_ref()
-        .map_or(1, |job| job.selection.format_id.split('+').count());
-    let video_output = job.as_ref().map_or(true, |job| {
-        job.selection.output_mode == YoutubeOutput::Video
+        .map(|job| &job.selection)
+        .or_else(|| web_job.as_ref().map(|job| &job.selection));
+    let expected_components = selection
+        .as_ref()
+        .map_or(1, |selection| selection.format_id.split('+').count());
+    let video_output = selection.as_ref().map_or(true, |selection| {
+        selection.output_mode == YoutubeOutput::Video
     });
     loop {
         let buffer = source.fill_buf().await?;

@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use metadata::parse_preview;
+pub use metadata::parse_web_preview;
 use tools::MediaTools;
 
 pub(super) fn media_error(message: &str) -> DlmanError {
@@ -142,6 +143,16 @@ impl YoutubeService {
         let root = self.root.read().map_err(|_| media_error("Media tools unavailable."))?
             .clone().ok_or_else(|| media_error("Bundled YouTube tools are unavailable. Install a complete DLMan desktop package."))?;
         MediaTools::load(&root)
+    }
+
+    /// Reuse the verified executables and process limits without YouTube session handling.
+    pub(crate) async fn extract_web_metadata(
+        &self,
+        context: &crate::media::web::WebMediaContext,
+        proxy: &ProxySettings,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, DlmanError> {
+        self.tools()?.metadata_context(context, proxy, cancel).await
     }
 
     pub async fn inspect(
@@ -398,17 +409,28 @@ impl DlmanCore {
             return Err(media_error("This download is already complete."));
         }
         let checked = (|| -> Result<YoutubeJob, DlmanError> {
-            let job: YoutubeJob =
+            let web = download.web_media.is_some();
+            let job: YoutubeJob = if let Some(value) = download.web_media.clone() {
+                let job: WebMediaJob = serde_json::from_value(value)
+                    .map_err(|_| media_error("Invalid stored video selection. Add the video again."))?;
+                if job.selection.output_mode != YoutubeOutput::Video {
+                    return Err(media_error("Invalid webpage video output mode."));
+                }
+                YoutubeJob { selection: job.selection, stage_dir: job.stage_dir, requires_browser_session: false }
+            } else {
                 serde_json::from_value(download.youtube.clone().ok_or_else(|| {
                     media_error("Missing YouTube selection. Add the video again.")
                 })?)
                 .map_err(|_| {
                     media_error("Invalid stored YouTube selection. Add the video again.")
-                })?;
-            canonical_url(&download.url)?;
+                })?
+            };
+            if web { crate::media::web::canonical_url(&download.url)?; }
+            else { canonical_url(&download.url)?; }
+            let prefix = if web { "web-media" } else { "youtube" };
             if !job.stage_dir.is_absolute()
                 || job.stage_dir.file_name().and_then(|v| v.to_str())
-                    != Some(format!("youtube-{id}").as_str())
+                    != Some(format!("{prefix}-{id}").as_str())
             {
                 return Err(media_error("Invalid YouTube staging location."));
             }
@@ -502,7 +524,7 @@ impl DlmanCore {
     }
 }
 
-fn safe_filename(value: &str, extension: &str) -> Result<String, DlmanError> {
+pub(crate) fn safe_filename(value: &str, extension: &str) -> Result<String, DlmanError> {
     if !["mp4", "webm", "mkv", "mp3"].contains(&extension) {
         return Err(media_error("Invalid output container."));
     }
@@ -552,6 +574,15 @@ fn safe_filename(value: &str, extension: &str) -> Result<String, DlmanError> {
         clean.insert(0, '_');
     }
     Ok(clean)
+}
+
+/// Apply the selected container when a legacy download intake supplies a manifest filename.
+pub fn safe_web_filename(value: &str, extension: &str) -> Result<String, DlmanError> {
+    if !["mp4", "webm", "mkv"].contains(&extension) {
+        return Err(media_error("Invalid webpage video output container."));
+    }
+    let value = std::path::Path::new(value).file_stem().and_then(|v| v.to_str()).unwrap_or(value);
+    safe_filename(value, extension)
 }
 
 #[cfg(test)]

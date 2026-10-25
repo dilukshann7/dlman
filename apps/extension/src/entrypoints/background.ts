@@ -1,5 +1,8 @@
+import { classifyMediaCandidate } from '../../../../shared/media-policy.mjs';
+import { handleAutomaticMedia, forgetAutomaticMediaTab, resetAutomaticMedia } from '@/lib/automatic-media';
 import { canonicalYoutubeUrl, isYoutubeHost } from '../../../../shared/youtube.mjs';
 import { handleYoutubeVerificationMessage } from '@/lib/youtube-verification';
+import { handleWebMediaCaptureMessage, setupWebMediaCapture } from '@/lib/web-media-capture';
 import { defineBackground } from 'wxt/sandbox';
 import { getDlmanClient, resetDlmanClient } from '@/lib/api-client';
 import type { WsEvent } from '@/lib/api-client';
@@ -10,6 +13,7 @@ import type { MediaDownloadRequest, DetectedMedia } from '@/lib/media-types';
 
 export default defineBackground(() => {
   console.log('[DLMan] Background service worker started');
+  setupWebMediaCapture();
 
   // Compat shim: browser.action (MV3) vs browser.browserAction (Firefox MV2)
   const actionApi = browser.action ?? (browser as any).browserAction;
@@ -37,6 +41,7 @@ export default defineBackground(() => {
       if (settings) {
         const portChanged = currentSettings?.port !== settings.port;
         currentSettings = settings;
+        resetAutomaticMedia();
 
         // Reconnect if port changed
         if (portChanged) {
@@ -87,6 +92,18 @@ export default defineBackground(() => {
   // DLMan Connection
   // ============================================================================
 
+  let automaticConnected = false;
+  function resumeAutomaticMedia() {
+    if (automaticConnected) return;
+    automaticConnected = true;
+    resetAutomaticMedia();
+    void browser.tabs.query({}).then((tabs) => {
+      for (const tab of tabs) if (tab.id != null) {
+        browser.tabs.sendMessage(tab.id, { type: 'media-discovery-retry' }).catch(() => {});
+      }
+    });
+  }
+
   async function connectToDlman() {
     if (!currentSettings?.enabled) {
       connectionStatus = 'disconnected';
@@ -100,11 +117,13 @@ export default defineBackground(() => {
     const client = getDlmanClient({
       port: currentSettings.port,
       onConnect: () => {
+        resumeAutomaticMedia();
         connectionStatus = 'connected';
         updateBadge();
         console.log('[DLMan] Connected to desktop app');
       },
       onDisconnect: () => {
+        automaticConnected = false;
         connectionStatus = 'disconnected';
         updateBadge();
         console.log('[DLMan] Disconnected from desktop app');
@@ -139,6 +158,7 @@ export default defineBackground(() => {
     // First check if the app is even running
     const isRunning = await client.ping();
     if (!isRunning) {
+      automaticConnected = false;
       connectionStatus = 'disconnected';
       updateBadge();
       console.log('[DLMan] Desktop app not running');
@@ -236,12 +256,16 @@ export default defineBackground(() => {
               type: 'get-video-at-point',
               x,
               y,
-            }) as { request?: MediaDownloadRequest };
+            }, { frameId: info.frameId ?? 0 }) as { request?: MediaDownloadRequest };
             if (resp?.request) {
               const client = getDlmanClient();
               const isAvailable = await client.ping();
               if (isAvailable) {
-                await client.downloadMedia(resp.request);
+                const request = resp.request;
+                if (request.media.protocol === 'webpage' && request.inspection_id && request.web_media_selection) {
+                  await client.downloadWebMedia({ url: request.media.extraction_url || request.media.page_url,
+                    inspection_id: request.inspection_id, selection: request.web_media_selection });
+                } else if (request.media.protocol !== 'webpage') await client.downloadMedia(request);
               } else if (resp.request.media.protocol === 'direct') {
                 await handleDownload(
                   resp.request.media.master_url,
@@ -428,159 +452,51 @@ export default defineBackground(() => {
   // Stream Detection via webRequest — catches HLS / DASH / direct video URLs
   // that are loaded by the page's JS (invisible to content script).
   //
-  // Two strategies:
-  // 1. onBeforeRequest: check URL patterns (extensions + keywords)
-  // 2. onHeadersReceived: check Content-Type header (catches API-served streams)
+  // Confirm successful responses before reporting candidates. URL extensions
+  // and response MIME types share the same ad/transport-resource classifier.
   // ============================================================================
 
-  // --- URL-based detection (protocol-based, NOT site-specific) ---
-  // Match ONLY by file extension — this is the reliable, non-hardcoded approach.
-  // .ts segments are excluded (HLS chunks, not manifests).
-  // API endpoints without extensions are caught by onHeadersReceived (Content-Type).
-  const EXT_PATTERN = /\.(m3u8|mpd|mp4|webm|mkv|mov|m4v|flv)(\?|#|$)/i;
-
   // --- MIME-based detection ---
-  const MANIFEST_MIMES = new Set([
-    'application/vnd.apple.mpegurl',
-    'application/x-mpegurl',
-    'audio/mpegurl',
-    'audio/x-mpegurl',
-    'application/dash+xml',
-  ]);
-  const VIDEO_MIMES = new Set([
-    'video/mp4',
-    'video/webm',
-    'video/x-matroska',
-    'video/mp2t',      // HLS .ts segments
-    'video/quicktime',
-    'video/x-flv',
-  ]);
+  interface StreamHint { url: string; protocol: string; documentId?: string }
+  const sentUrls = new Map<string, Set<string>>();
+  const pendingStreamUrls = new Map<string, StreamHint[]>();
+  const frameDocuments = new Map<string, string>();
+  const frameKey = (tabId: number, frameId: number) => tabId + ':' + frameId;
 
-  // --- Noise filters ---
-  // Skip ad/tracking/VAST domains that might serve video-like content or metadata
-  const AD_DOMAINS = /doubleclick\.net|googlesyndication|googleadservices|facebook\.com\/tr|analytics|adserver|adsystem|sabavision\.com|imasdk\.googleapis|moatads|serving-sys\.com/i;
-  // Skip browser resource types that are never video
-  const SKIP_TYPES = new Set(['image', 'stylesheet', 'font', 'beacon', 'csp_report', 'ping']);
-  // Already-sent URLs per tab (avoid flooding content script)
-  const sentUrls = new Map<number, Set<string>>();
-  // Buffered stream URLs per tab — flushed when content script sends 'content-script-ready'
-  const pendingStreamUrls = new Map<number, Array<{ url: string; protocol?: string }>>();
-
-  function urlBase(url: string): string {
-    try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; }
-  }
-
-  function markSent(tabId: number, url: string): boolean {
-    let set = sentUrls.get(tabId);
-    if (!set) { set = new Set(); sentUrls.set(tabId, set); }
-    const key = urlBase(url);
-    if (set.has(key)) return false;
-    set.add(key);
-    return true;
-  }
-
-  function notifyContentScript(tabId: number, url: string, protocol?: string): void {
-    if (!markSent(tabId, url)) return;
-    console.log('[DLMan] Stream detected:', url.substring(0, 120), protocol || '');
-    browser.tabs.sendMessage(tabId, { type: 'stream-detected', url, protocol }).catch(() => {
-      // Content script not ready yet — un-mark and buffer for later delivery
-      const set = sentUrls.get(tabId);
-      if (set) set.delete(urlBase(url));
-      let pending = pendingStreamUrls.get(tabId);
-      if (!pending) { pending = []; pendingStreamUrls.set(tabId, pending); }
-      if (!pending.some(p => urlBase(p.url) === urlBase(url))) {
-        pending.push({ url, protocol });
-      }
-      console.log('[DLMan] Buffered stream for tab', tabId, '(content script not ready)');
+  function notifyContentScript(tabId: number, frameId: number, item: StreamHint): void {
+    const key = frameKey(tabId, frameId);
+    const identity = (item.documentId || '') + ':' + item.url;
+    let seen = sentUrls.get(key);
+    if (!seen) { seen = new Set(); sentUrls.set(key, seen); }
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    if (seen.size > 128) seen.delete(seen.values().next().value!);
+    browser.tabs.sendMessage(tabId, { type: 'stream-detected', ...item }, { frameId }).catch(() => {
+      seen!.delete(identity);
+      const pending = pendingStreamUrls.get(key) || [];
+      if (!pending.some((entry) => entry.url === item.url && entry.documentId === item.documentId)) pending.push(item);
+      pendingStreamUrls.set(key, pending.slice(-64));
     });
   }
 
   function setupStreamDetection(): void {
-    // Clean up per-tab data when tabs close or navigate
-    browser.tabs.onRemoved.addListener((tabId) => {
-      sentUrls.delete(tabId);
-      pendingStreamUrls.delete(tabId);
-    });
-    browser.tabs.onUpdated.addListener((tabId, info) => {
-      if (info.status === 'loading') {
-        sentUrls.delete(tabId);
-        pendingStreamUrls.delete(tabId);
+    const clearTab = (tabId: number) => {
+      for (const map of [sentUrls, pendingStreamUrls, frameDocuments]) {
+        for (const key of map.keys()) if (key.startsWith(tabId + ':')) map.delete(key);
       }
-    });
-
-    // Strategy 1: URL pattern matching (fires before request is made)
-    try {
-      browser.webRequest.onBeforeRequest.addListener(
-        (details) => {
-          if (details.tabId < 0) return;
-          const url = details.url;
-          if (!url || url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1')) return;
-          if (SKIP_TYPES.has(details.type as string)) return;
-          if (AD_DOMAINS.test(url)) return;
-
-          // Only match by file extension — pure protocol detection
-          if (!EXT_PATTERN.test(url)) return;
-
-          // Classify protocol from extension so content script knows the type
-          let protocol: string | undefined;
-          if (/\.m3u8(\?|#|$)/i.test(url)) protocol = 'hls';
-          else if (/\.mpd(\?|#|$)/i.test(url)) protocol = 'dash';
-          else protocol = 'direct';
-
-          notifyContentScript(details.tabId, url, protocol);
-        },
-        { urls: ['<all_urls>'] },
-        [],
-      );
-    } catch (e) {
-      console.warn('[DLMan] webRequest.onBeforeRequest not available:', e);
-    }
-
-    // Strategy 2: Response Content-Type matching (catches API-served manifests)
-    try {
-      browser.webRequest.onHeadersReceived.addListener(
-        (details) => {
-          if (details.tabId < 0) return;
-          if (!details.responseHeaders) return;
-          if (details.url.startsWith('http://localhost') || details.url.startsWith('http://127.0.0.1')) return;
-          if (AD_DOMAINS.test(details.url)) return;
-
-          const ctHeader = details.responseHeaders.find(
-            (h) => h.name.toLowerCase() === 'content-type',
-          );
-          if (!ctHeader?.value) return;
-          const mime = ctHeader.value.toLowerCase().split(';')[0].trim();
-
-          const isManifest = MANIFEST_MIMES.has(mime);
-          const isVideo = VIDEO_MIMES.has(mime) || mime.startsWith('video/');
-
-          if (!isManifest && !isVideo) return;
-
-          // For direct video files, check Content-Length (skip tiny files < 100KB)
-          // For manifests, allow ANY size (m3u8 playlists are typically 1-5KB)
-          if (isVideo && !isManifest) {
-            const clHeader = details.responseHeaders.find(
-              (h) => h.name.toLowerCase() === 'content-length',
-            );
-            if (clHeader?.value) {
-              const size = parseInt(clHeader.value, 10);
-              if (size > 0 && size < 100_000) return; // Skip tiny video files
-            }
-          }
-
-          // Determine protocol from MIME type for content script
-          const protocol = isManifest
-            ? (mime.includes('mpegurl') ? 'hls' : 'dash')
-            : 'direct';
-
-          notifyContentScript(details.tabId, details.url, protocol);
-        },
-        { urls: ['<all_urls>'] },
-        ['responseHeaders'],
-      );
-    } catch (e) {
-      console.warn('[DLMan] webRequest.onHeadersReceived not available:', e);
-    }
+      forgetAutomaticMediaTab(tabId);
+    };
+    browser.tabs.onRemoved.addListener(clearTab);
+    browser.tabs.onUpdated.addListener((tabId, info) => { if (info.status === 'loading') clearTab(tabId); });
+    browser.webRequest.onHeadersReceived.addListener((details) => {
+      if (details.tabId < 0 || details.frameId < 0 || (details.statusCode !== 304 && (details.statusCode < 200 || details.statusCode >= 300))) return;
+      if (!currentSettings?.enabled) return;
+      const mime = details.responseHeaders?.find((header) => header.name.toLowerCase() === 'content-type')?.value;
+      const candidate = classifyMediaCandidate({ url: details.url, mime });
+      if (!candidate) return;
+      const documentId = (details as typeof details & { documentId?: string }).documentId;
+      notifyContentScript(details.tabId, details.frameId, { ...candidate, documentId });
+    }, { urls: ['<all_urls>'] }, ['responseHeaders']);
   }
 
   // ============================================================================
@@ -615,8 +531,8 @@ export default defineBackground(() => {
         .join('; ');
 
       return cookieStr || undefined;
-    } catch (error) {
-      console.error('[DLMan] Failed to read cookies for', url, error);
+    } catch {
+      console.error('[DLMan] Failed to read browser cookies.');
       return undefined;
     }
   }
@@ -777,12 +693,23 @@ export default defineBackground(() => {
     media?: DetectedMedia;
     inspection_id?: string;
     request?: MediaDownloadRequest;
+    document_id?: string;
+    player_id?: string;
+    retry?: boolean;
+    eligible?: boolean;
   }
 
   browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     const msg = message as Message;
 
     switch (msg.type) {
+      case 'web-media-capture-claim':
+      case 'web-media-capture-active':
+      case 'web-media-capture-sources':
+        void handleWebMediaCaptureMessage(msg, sender).then(sendResponse).catch(() => {
+          sendResponse({ active: false, success: false, error: 'Browser capture is unavailable or expired. Start again in DLMan.' });
+        });
+        return true;
       case 'get-status':
         (async () => {
           const client = getDlmanClient({
@@ -856,22 +783,30 @@ export default defineBackground(() => {
       // Media detection & download (from content script video detector)
       // ==================================================================
 
-      case 'content-script-ready':
-        // Content script just loaded — flush any buffered stream URLs for this tab
-        if (sender.tab?.id != null) {
-          const tabId = sender.tab.id;
-          const pending = pendingStreamUrls.get(tabId);
-          if (pending && pending.length > 0) {
-            console.log('[DLMan] Flushing', pending.length, 'buffered streams for tab', tabId);
-            for (const item of pending) {
-              notifyContentScript(tabId, item.url, item.protocol);
-            }
-            pendingStreamUrls.delete(tabId);
+      case 'content-script-ready': {
+        if (sender.tab?.id != null && sender.frameId != null) {
+          const key = frameKey(sender.tab.id, sender.frameId);
+          const documentId = (sender as typeof sender & { documentId?: string }).documentId || '';
+          const previous = frameDocuments.get(key);
+          if (previous && previous !== documentId) sentUrls.delete(key);
+          frameDocuments.set(key, documentId);
+          const pending = pendingStreamUrls.get(key) || [];
+          pendingStreamUrls.delete(key);
+          for (const item of pending) {
+            if (!item.documentId || !documentId || item.documentId === documentId) notifyContentScript(sender.tab.id, sender.frameId, item);
           }
-          sendResponse({ ok: true });
-        } else {
-          sendResponse({ ok: true });
-        }
+          sendResponse({ ok: true, documentId });
+        } else sendResponse({ ok: true });
+        return true;
+      }
+
+      case 'media-discovery-ready':
+      case 'media-discovery-stop':
+      case 'media-discovery-player':
+      case 'web-media-auto-inspect':
+        void handleAutomaticMedia(msg, sender).then(sendResponse).catch((error) => {
+          sendResponse({ status: 'failed', deferred: !!error?.deferred, error: error instanceof Error ? error.message : 'Video inspection is unavailable.' });
+        });
         return true;
 
       case 'youtube-inspect':
@@ -904,7 +839,6 @@ export default defineBackground(() => {
           console.log(
             '[DLMan] Media detected:',
             msg.media.protocol,
-            msg.media.master_url,
             msg.media.variants?.length ?? 0,
             'variants',
           );
@@ -937,8 +871,14 @@ export default defineBackground(() => {
               return;
             }
 
-            // Send media download request to desktop app
-            const result = await client.downloadMedia(msg.request);
+            // Webpage selections stay separate from raw direct/HLS/DASH protocols.
+            if (msg.request.media.protocol === 'webpage' && (!msg.request.inspection_id || !msg.request.web_media_selection)) {
+              sendResponse({ success: false, error: 'Select a video quality first.' }); return;
+            }
+            const result = msg.request.media.protocol === 'webpage'
+              ? await client.downloadWebMedia({ url: msg.request.media.extraction_url || msg.request.media.page_url,
+                  inspection_id: msg.request.inspection_id!, selection: msg.request.web_media_selection! })
+              : await client.downloadMedia(msg.request);
             sendResponse({
               success: result.success,
               error: result.error,

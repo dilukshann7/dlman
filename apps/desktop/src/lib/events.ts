@@ -1,4 +1,5 @@
 import { createYoutubeDialogQueue, type YoutubeSelection } from "../../../../shared/youtube.mjs";
+import type { WebMediaSelection, WebMediaQualityHint } from "../../../../shared/web-media.mjs";
 // Tauri event listener setup
 
 import { listen } from "@tauri-apps/api/event";
@@ -60,6 +61,8 @@ export function getPendingSourcePage(): string | undefined {
 }
 // Store for media metadata from browser extension (HLS/DASH streaming)
 let pendingMediaMeta: {
+  media_quality?: WebMediaQualityHint;
+  web_media_selection?: WebMediaSelection;
   protocol: string;
   master_url: string;
   page_title?: string;
@@ -327,7 +330,7 @@ export function setupEventListeners(): () => void {
   // Listen for show-new-download-dialog event (from deep links / extension)
   // Payload can be a plain URL string (legacy) or structured object with url, referrer, filename, cookies
   // For HLS/DASH media, also includes media_protocol, media_master_url, etc.
-  type DownloadDialogPayload = string | { url: string; referrer?: string; filename?: string; cookies?: string; media_protocol?: string; media_master_url?: string; media_page_title?: string; variant_index?: number; youtube_selection?: YoutubeSelection; inspection_id?: string } | null;
+  type DownloadDialogPayload = string | { url: string; referrer?: string; filename?: string; cookies?: string; media_protocol?: string; media_master_url?: string; media_page_title?: string; variant_index?: number; youtube_selection?: YoutubeSelection; web_media_selection?: WebMediaSelection; media_quality?: WebMediaQualityHint; inspection_id?: string } | null;
   const presentDownloadDialog = (payload: DownloadDialogPayload) => {
     if (isCleanedUp) return;
       // Parse payload - can be string (URL) or structured object
@@ -351,6 +354,8 @@ export function setupEventListeners(): () => void {
               page_title: payload.media_page_title,
               variant_index: payload.variant_index,
               youtube_selection: payload.youtube_selection,
+              web_media_selection: payload.web_media_selection,
+              media_quality: payload.media_quality,
               inspection_id: payload.inspection_id,
               referrer: payload.referrer,
             });
@@ -374,7 +379,7 @@ export function setupEventListeners(): () => void {
   registerListener(listen<DownloadDialogPayload>("show-new-download-dialog", (event) => {
     if (isCleanedUp) return;
     const payload = event.payload;
-    if (payload && typeof payload === 'object' && payload.media_protocol === 'youtube') youtubeDialogs.offer(payload);
+    if (payload && typeof payload === 'object' && ['youtube', 'webpage'].includes(payload.media_protocol || '')) youtubeDialogs.offer(payload);
     else presentDownloadDialog(payload);
   }));
 

@@ -209,7 +209,7 @@ export function DownloadInfoDialog({ open, onOpenChange, download }: DownloadInf
 
   const progress = download.size ? (download.downloaded / download.size) * 100 : 0;
   const totalSizeLabel = download.size
-    ? `${download.youtube && download.status !== 'completed' ? '~' : ''}${formatBytes(download.size)}`
+    ? `${(download.youtube || download.web_media) && download.status !== 'completed' ? '~' : ''}${formatBytes(download.size)}`
     : t('downloadItem.unknown');
 
   const getStatusInfo = () => {

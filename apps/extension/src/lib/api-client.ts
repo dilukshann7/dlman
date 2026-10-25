@@ -222,7 +222,7 @@ export class DlmanClient {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || `HTTP ${response.status}`);
+      throw Object.assign(new Error(text || ('HTTP ' + response.status)), { status: response.status });
     }
 
     return response.json();
@@ -358,6 +358,18 @@ export class DlmanClient {
    */
   async inspectYoutube(url: string) {
     return this.httpRequest<import('../../../../shared/youtube.mjs').YoutubeInspection>('POST', '/api/media/inspect', { url });
+  }
+
+  async inspectWebMedia(url: string) {
+    return this.httpRequest<import('../../../../shared/web-media.mjs').WebMediaInspection>('POST', '/api/web-media/inspect', { url });
+  }
+
+  async webMediaInspection(id: string) {
+    return this.httpRequest<import('../../../../shared/web-media.mjs').WebMediaInspection>('GET', '/api/web-media/inspect/' + encodeURIComponent(id));
+  }
+
+  async downloadWebMedia(request: { url: string; inspection_id: string; selection: import('../../../../shared/web-media.mjs').WebMediaSelection }) {
+    return this.httpRequest<MediaDownloadResponse>('POST', '/api/web-media/download', request);
   }
 
   async submitYoutubeVerification(payload: { token: string; url: string; cookies: import('../../../../shared/youtube-verification.mjs').YoutubeSessionCookie[] }) {

@@ -13,6 +13,7 @@ test('only paused and failed ordinary HTTP downloads can refresh', () => {
     assert.equal(canRefreshDownload({ ...job, url }), false);
   }
   assert.equal(canRefreshDownload({ ...job, youtube: {} }), false);
+  assert.equal(canRefreshDownload({ ...job, web_media: {} }), false);
 });
 test('session expires at its deadline', () => {
   assert.equal(refreshSessionExpired({ expires_at: 1000 }, 999), false);

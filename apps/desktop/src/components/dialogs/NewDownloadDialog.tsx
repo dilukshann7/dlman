@@ -1,4 +1,7 @@
 import { useYoutubeInspection } from '@/hooks/useYoutubeInspection';
+import { useWebMediaInspection } from '@/hooks/useWebMediaInspection';
+import { webMediaFilename } from '../../../../../shared/web-media.mjs';
+import { webMediaExtensionContext } from '@/lib/web-media-context';
 import { isYoutubeHost, type YoutubeSelection } from '../../../../../shared/youtube.mjs';
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -93,6 +96,8 @@ export function NewDownloadDialog() {
   const [isAdding, setIsAdding] = useState(false); // Kept for button disabled state during brief window
   const [rememberPathForCategory, setRememberPathForCategory] = useState(false);
   const [pathCustomized, setPathCustomized] = useState(false);
+  const categoryCustomizedRef = useRef(false);
+  const webMediaNamedRef = useRef(false);
   // Track if user has manually customized the path (ref for logic, state for UI reactivity)
   const pathCustomizedRef = useRef(false);
   // Trigger to force re-probe when dialog opens (even with same URL)
@@ -100,8 +105,11 @@ export function NewDownloadDialog() {
   // Browser cookies passed from extension for session-based auth
   const [sourcePageUrl, setSourcePageUrl] = useState<string | undefined>(undefined);
   const [browserCookies, setBrowserCookies] = useState<string | undefined>(undefined);
+  const [browserIntakeUrl, setBrowserIntakeUrl] = useState<string | undefined>(undefined);
   // Media metadata for HLS/DASH streaming downloads (from browser extension)
   const [mediaMeta, setMediaMeta] = useState<{
+    media_quality?: import('../../../../../shared/web-media.mjs').WebMediaQualityHint;
+    web_media_selection?: import('../../../../../shared/web-media.mjs').WebMediaSelection;
     protocol: string;
     master_url: string;
     page_title?: string;
@@ -112,6 +120,22 @@ export function NewDownloadDialog() {
 
   const youtube = useYoutubeInspection(url, showNewDownloadDialog, mediaMeta?.youtube_selection);
   const youtubeUnavailable = youtube.enabled && (youtube.loading || !!youtube.error || !youtube.selection);
+  const webMediaContext = useMemo(() => webMediaExtensionContext(url, browserIntakeUrl,
+    { media: mediaMeta, sourcePageUrl, cookies: browserCookies }),
+  [url, browserIntakeUrl, mediaMeta, sourcePageUrl, browserCookies]);
+  const webMedia = useWebMediaInspection(url, showNewDownloadDialog, webMediaContext, mediaMeta?.web_media_selection);
+  const webMediaUnavailable = webMedia.enabled && (webMedia.loading || !!webMedia.error
+    || (!webMedia.file && !webMedia.selection) || webMedia.capture.waiting
+    || (!!webMedia.capture.capture && !webMedia.capture.sourceId && webMedia.capture.capture.status === 'ready'));
+  const submissionGeneration = useRef(0);
+  const submissionContext = useRef('');
+  const submissionKey = JSON.stringify([url, showNewDownloadDialog, urlIntakeNonce,
+    webMedia.selection, webMedia.capture.sourceId]);
+  submissionContext.current = submissionKey;
+  useEffect(() => {
+    submissionGeneration.current++;
+    setIsAdding(false);
+  }, [submissionKey]);
 
   // Tracks which intake we've already processed. Keyed on the intake nonce so
   // the effect runs once per open AND once per new drop/paste while open, but
@@ -140,6 +164,7 @@ export function NewDownloadDialog() {
     // Check for pending cookies from browser extension
     const cookies = getPendingCookies();
     setBrowserCookies(cookies);
+    setBrowserIntakeUrl(pendingUrls[0]);
     setSourcePageUrl(getPendingSourcePage());
     
     // Check for media metadata (HLS/DASH streaming)
@@ -155,6 +180,8 @@ export function NewDownloadDialog() {
     setFilename('');
     setCustomFilename('');
     setFilenameEdited(false);
+    categoryCustomizedRef.current = false;
+    webMediaNamedRef.current = false;
     setShowAdvancedPath(false);
     setFileSize(null);
     setProbeError(null);
@@ -179,6 +206,7 @@ export function NewDownloadDialog() {
 
   // Update category and path when filename changes (auto-detect)
   const updateCategoryFromFilename = useCallback(async (newFilename: string) => {
+    if (categoryCustomizedRef.current) return;
     const detectedCategory = detectCategoryFromFilename(newFilename);
     if (detectedCategory) {
       setCategoryId(detectedCategory.id);
@@ -192,6 +220,7 @@ export function NewDownloadDialog() {
 
   // Handle manual category change
   const handleCategoryChange = async (newCategoryId: string) => {
+    categoryCustomizedRef.current = true;
     const id = newCategoryId === 'none' ? null : newCategoryId;
     setCategoryId(id);
     // Only update path if user hasn't customized it
@@ -227,6 +256,13 @@ export function NewDownloadDialog() {
     }
 
     if (isYoutubeHost(url)) { setIsProbing(false); setRequiresAuth(false); setProbeError(null); return; }
+    // Generic HTTP(S) links are classified before ordinary probing. Video pages
+    // and manifests never enter the file transfer flow on extraction failure.
+    if (webMedia.enabled && !webMedia.file) {
+      setIsProbing(false); setRequiresAuth(false); setProbeError(null);
+      setFilename(''); setFileSize(null);
+      return;
+    }
 
     if (!url) {
       setFilename('');
@@ -297,7 +333,7 @@ export function NewDownloadDialog() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [url, probeTrigger, updateCategoryFromFilename, showNewDownloadDialog, mediaMeta, t]);
+  }, [url, probeTrigger, updateCategoryFromFilename, showNewDownloadDialog, mediaMeta, t, webMedia.enabled, webMedia.file]);
 
   const handlePasteFromClipboard = useCallback(async () => {
     try {
@@ -349,22 +385,47 @@ export function NewDownloadDialog() {
     updateCategoryFromFilename(name);
   }, [youtube.preview, youtube.selection, filenameEdited, updateCategoryFromFilename]);
 
+  useEffect(() => {
+    if (!webMedia.preview || !webMedia.selection) return;
+    const name = webMediaFilename(webMedia.preview.title, webMedia.selection.container);
+    setFilename(name);
+    setFileSize(webMedia.preview.variants.find((variant) => variant.id === webMedia.selection?.format_id)?.size ?? null);
+    setCustomFilename((previous) => filenameEdited
+      ? webMediaFilename(webMedia.preview!.title, webMedia.selection!.container, previous) : name);
+    if (!webMediaNamedRef.current) {
+      webMediaNamedRef.current = true;
+      if (!webMedia.capture.capture && !webMedia.capture.waiting) void updateCategoryFromFilename(name);
+    }
+  }, [webMedia.preview, webMedia.selection, webMedia.capture.capture, webMedia.capture.waiting, filenameEdited, updateCategoryFromFilename]);
+
   const handleAddDownload = useCallback(async (startLater: boolean = false) => {
-    if (!url || !destination || youtubeUnavailable) {
+    if (!url || !destination || youtubeUnavailable || webMediaUnavailable) {
       toast.error(t('toasts.enterUrlAndDest'));
       return;
     }
+    const submission = ++submissionGeneration.current;
+    const isCurrentSubmission = () => submission === submissionGeneration.current && submissionContext.current === submissionKey;
 
     let refreshedInspectionId = youtube.inspectionId;
     if (youtube.enabled) {
       setIsAdding(true);
       try { refreshedInspectionId = await youtube.refreshSelection(); }
-      catch (error) { toast.error(error instanceof Error ? error.message : String(error)); return; }
-      finally { setIsAdding(false); }
+      catch (error) { if (isCurrentSubmission()) toast.error(error instanceof Error ? error.message : String(error)); return; }
+      finally { if (isCurrentSubmission()) setIsAdding(false); }
     }
+    let webInspectionId = webMedia.inspectionId;
+    if (webMedia.enabled && !webMedia.file) {
+      setIsAdding(true);
+      try { webInspectionId = await webMedia.refreshSelection(); }
+      catch (error) { if (isCurrentSubmission()) toast.error(error instanceof Error ? error.message : String(error)); return; }
+      finally { if (isCurrentSubmission()) setIsAdding(false); }
+    }
+    if (!isCurrentSubmission()) return;
 
     // Get the filename to use (custom if edited, otherwise probed)
-    const filenameToUse = filenameEdited && customFilename ? customFilename : filename;
+    const requestedFilename = filenameEdited && customFilename ? customFilename : filename;
+    const filenameToUse = webMedia.selection && webMedia.preview
+      ? webMediaFilename(webMedia.preview.title, webMedia.selection.container, requestedFilename) : requestedFilename;
     
     // OPTIMISTIC UI: Close dialog immediately and add placeholder
     const tempId = crypto.randomUUID();
@@ -428,17 +489,11 @@ export function NewDownloadDialog() {
             destination, queue_id: queueId, category_id: categoryId || null,
             filename: filenameToUse || null, start_later: startLater,
           });
-        } else if (mediaMeta && (mediaMeta.protocol === 'hls' || mediaMeta.protocol === 'dash')) {
-          // HLS/DASH streaming — call the dedicated media download command
-          await invoke<DownloadType>('start_media_download', {
-            master_url: mediaMeta.master_url,
-            protocol: mediaMeta.protocol,
-            variant_index: mediaMeta.variant_index ?? null,
-            filename: filenameToUse || null,
-            page_title: mediaMeta.page_title || null,
-            cookies: browserCookies || null,
-            referrer: mediaMeta.referrer || (url !== mediaMeta.master_url ? url : null),
-            start_later: startLater,
+        } else if (webMedia.enabled && webMedia.selection && webInspectionId) {
+          await invoke<DownloadType>('start_web_media_download', {
+            url: webMedia.transferUrl, inspection_id: webInspectionId, selection: webMedia.selection,
+            destination, queue_id: queueId, category_id: categoryId || null,
+            filename: filenameToUse || null, start_later: startLater,
           });
         } else {
           // Regular download — standard flow
@@ -474,7 +529,7 @@ export function NewDownloadDialog() {
         toast.error(t('toasts.addDownloadFailed'), { description: errorMsg });
       }
     }
-  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, sourcePageUrl, mediaMeta, youtube, youtubeUnavailable, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
+  }, [url, destination, queueId, categoryId, filename, customFilename, filenameEdited, fileSize, browserCookies, sourcePageUrl, mediaMeta, youtube, youtubeUnavailable, webMedia, webMediaUnavailable, submissionKey, addDownload, removeDownload, setShowNewDownloadDialog, rememberPathForCategory, updateCategory, selectedCategoryId, setSelectedCategory, setFilter, setSelectedQueue, selectedQueueId, t]);
 
   const formatFileSize = (bytes: number) => {
     if (bytes >= 1024 * 1024 * 1024) {
@@ -727,6 +782,45 @@ export function NewDownloadDialog() {
             </div>
           )}
 
+          {webMedia.enabled && (!webMedia.file || webMedia.capture.capture || webMedia.capture.waiting || webMedia.capture.error) && (
+            <div className="space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">{t('webMedia.quality', 'Video quality')}</Label>
+              {webMedia.loading && <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Loader2 className="h-4 w-4 animate-spin" />{t('webMedia.loading', 'Checking for downloadable video…')}</div>}
+              {webMedia.error && <p className="text-sm text-destructive" role="alert">{webMedia.error}</p>}
+              {webMedia.preview && webMedia.selection && (
+                <Select value={webMedia.selection.format_id} onValueChange={webMedia.choose} disabled={webMedia.capture.waiting}>
+                  <SelectTrigger><SelectValue placeholder={t('webMedia.selectQuality', 'Select quality')} /></SelectTrigger>
+                  <SelectContent>{webMedia.preview.variants.map((variant) => <SelectItem key={variant.id} value={variant.id}>
+                    {variant.quality} · {variant.container.toUpperCase()}{variant.fps ? ` · ${variant.fps} fps` : ''}{variant.audio ? ` · ${variant.audio}` : ''}
+                  </SelectItem>)}</SelectContent>
+                </Select>
+              )}
+              {webMedia.capture.capture?.status === 'ready' && webMedia.capture.capture.sources.length > 1 && (
+                <div className="space-y-2">
+                  <Label>{t('webMedia.source', 'Detected video')}</Label>
+                  <Select value={webMedia.capture.sourceId || ''} onValueChange={webMedia.capture.chooseSource}>
+                    <SelectTrigger><SelectValue placeholder={t('webMedia.selectSource', 'Select a detected video')} /></SelectTrigger>
+                    <SelectContent>{webMedia.capture.capture.sources.map((source, index) => <SelectItem key={source.id} value={source.id}>
+                      {source.title || `${t('webMedia.video', 'Video')} ${index + 1}`} · {source.protocol.toUpperCase()}
+                    </SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" disabled={webMedia.loading || webMedia.capture.waiting} onClick={webMedia.retry}>{t('webMedia.retry', 'Retry')}</Button>
+                <Button size="sm" variant="outline" disabled={webMedia.capture.waiting && !webMedia.capture.extensionMissing} onClick={() => { void webMedia.capture.begin(); }}>{t('webMedia.detect', 'Detect in browser')}</Button>
+                {webMedia.capture.waiting && <Button size="sm" variant="ghost" onClick={webMedia.capture.cancel}>{t('common.cancel', 'Cancel')}</Button>}
+              </div>
+              {webMedia.capture.waiting && <p className="text-xs text-muted-foreground" role="status">
+                {webMedia.capture.capture?.status === 'watching'
+                  ? t('webMedia.watching', 'Browser connected. Play the video on the opened page. Waiting up to 10 minutes…')
+                  : t('webMedia.waiting', 'Connecting to the DLMan extension. Enable it in the opened browser, then play the video. Waiting up to 10 minutes…')}
+              </p>}
+              {webMedia.capture.extensionMissing && <p className="text-xs text-muted-foreground" role="status">{t('webMedia.extensionMissing', 'The DLMan extension has not connected. Install or enable it in the browser that opened, then retry Detect in browser.')}</p>}
+              {webMedia.capture.error && <p className="text-sm text-destructive" role="alert">{webMedia.capture.error}</p>}
+            </div>
+          )}
+
           {/* Destination */}
           <div className="space-y-2">
             <Label htmlFor="destination" className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
@@ -830,9 +924,8 @@ export function NewDownloadDialog() {
           </div>
         </div>
 
-        {/* Footer. Start / Download Later only require a URL + destination — they
-            are intentionally NOT gated on the probe, so a download can be started
-            immediately even while the file size is still being detected. */}
+        {/* Video pages require a ready inspection and selected quality. Ordinary
+            files may start as soon as classification finishes. */}
         <DialogFooter className="shrink-0 flex-row items-center justify-end gap-2 border-t px-6 py-4">
           <Button
             variant="ghost"
@@ -843,7 +936,7 @@ export function NewDownloadDialog() {
           <Button
             variant="outline"
             onClick={() => handleAddDownload(true)}
-            disabled={!url || !destination || isAdding || youtubeUnavailable}
+            disabled={!url || !destination || isAdding || youtubeUnavailable || webMediaUnavailable}
             title={t('newDownload.downloadLaterTitle')}
           >
             <Clock className="mr-2 h-4 w-4" />
@@ -851,7 +944,7 @@ export function NewDownloadDialog() {
           </Button>
           <Button
             onClick={() => handleAddDownload(false)}
-            disabled={!url || !destination || isAdding || youtubeUnavailable}
+            disabled={!url || !destination || isAdding || youtubeUnavailable || webMediaUnavailable}
           >
             {isAdding ? (
               <>

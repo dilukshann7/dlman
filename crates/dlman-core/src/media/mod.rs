@@ -19,6 +19,8 @@
 
 pub mod hls;
 pub mod youtube;
+pub mod web;
+mod web_transfer;
 pub mod dash;
 
 use crate::error::DlmanError;

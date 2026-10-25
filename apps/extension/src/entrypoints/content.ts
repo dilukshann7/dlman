@@ -2,6 +2,8 @@ import { isYoutubeHost } from '../../../../shared/youtube.mjs';
 import { offerYoutubeVerification } from '@/lib/youtube-verification';
 import { YoutubeController, resolveYoutubeMedia } from '@/lib/youtube';
 import { defineContentScript } from 'wxt/sandbox';
+import { resolveWebpageMedia, discoveryDocumentId } from '@/lib/webpage-media';
+import { settingsStorage } from '@/lib/storage';
 import { VideoDetector } from '@/lib/video-detector';
 import { VideoOverlayManager } from '@/lib/video-overlay';
 import { resolveHlsVariants } from '@/lib/hls-parser';
@@ -13,9 +15,11 @@ import type { DetectedMedia, MediaDownloadRequest } from '@/lib/media-types';
  */
 export default defineContentScript({
   matches: ['<all_urls>'],
-  runAt: 'document_idle',
+  runAt: 'document_start',
+  allFrames: true,
+  matchAboutBlank: true,
   
-  main() {
+  main(ctx) {
     offerYoutubeVerification();
     window.addEventListener('hashchange', offerYoutubeVerification);
     console.log('[DLMan] Content script loaded');
@@ -395,10 +399,6 @@ export default defineContentScript({
     // Initialize
     setupLinkClickHandler();
 
-    // Notify background we're ready — triggers delivery of any
-    // stream URLs caught by webRequest before we loaded.
-    browser.runtime.sendMessage({ type: 'content-script-ready' }).catch(() => {});
-
     // ========================================================================
     // Video Detection & Overlay
     // ========================================================================
@@ -412,45 +412,66 @@ export default defineContentScript({
         }
         request = { ...request, media: resolved, inspection_id: resolved.inspection_id };
       }
+      if (request.media.protocol === 'webpage') {
+        const resolved = await resolveWebpageMedia(request.media);
+        const selected = request.web_media_selection;
+        if (!selected || !resolved.variants.some((variant) => JSON.stringify(variant.web_media_selection) === JSON.stringify(selected))) {
+          throw new Error('Selected quality is unavailable. Refresh the quality list.');
+        }
+        request = { ...request, media: resolved, inspection_id: resolved.inspection_id };
+      }
       const result = await browser.runtime.sendMessage({
         type: 'media-download',
         request,
       }) as { success?: boolean; error?: string };
       if (!result?.success) throw new Error(result?.error || 'Download was not accepted.');
       showDlmanToast(1);
-    }, resolveYoutubeMedia);
+    }, (media) => media.protocol === 'webpage' ? resolveWebpageMedia(media, media.discovery_status === 'failed') : resolveYoutubeMedia(media));
     const youtubeController = new YoutubeController(overlayManager);
 
+    const eligibility = new Map<string, boolean>();
+    const markEligible = (id: string, eligible: boolean) => {
+      if (eligibility.get(id) === eligible) return;
+      eligibility.set(id, eligible);
+      void browser.runtime.sendMessage({ type: 'media-discovery-player', document_id: discoveryDocumentId(),
+        player_id: id, eligible }).catch(() => {});
+    };
     const detector = new VideoDetector({
-      onDetected: async (media: DetectedMedia) => {
-        console.log('[DLMan] Media detected:', media.protocol, media.master_url);
-
-        let variants = media.variants;
-        if (media.protocol === 'hls' && variants.length === 0) {
-          try {
-            variants = await resolveHlsVariants(
-              media.master_url,
-              media.cookies,
-              media.referrer,
-            );
-            media.variants = variants;
-          } catch (err) {
-            console.warn('[DLMan] Failed to resolve HLS variants:', err);
-          }
+      onDetected: (media: DetectedMedia, target?: HTMLElement) => {
+        overlayManager.addOverlay(media, media.variants, target);
+        markEligible(media.id, media.protocol === 'webpage' && detector.isVisible(media.id));
+        if (media.protocol === 'webpage' && media.discovery_status === 'detecting') {
+          void resolveWebpageMedia(media, false, () => detector.detected.get(media.id) === media && detector.isVisible(media.id))
+            .then((resolved) => detector.resolvePlayer(media, resolved)).catch((error) => {
+            detector.resolvePlayer(media, { ...media, discovery_status: error?.deferred || document.hidden || !detector.isVisible(media.id) ? 'deferred' : 'failed',
+              discovery_error: error instanceof Error ? error.message : 'Video inspection is unavailable.' });
+          });
         }
-
-        overlayManager.addOverlay(media, variants);
-
-        browser.runtime.sendMessage({
-          type: 'media-detected',
-          media,
-        }).catch(() => {});
+        if (media.protocol === 'hls' && media.variants.length === 1 && media.variants[0].label === 'Original') {
+          void resolveHlsVariants(media.master_url, media.cookies, media.referrer).then((variants) => {
+            if (variants.length) detector.resolvePlayer(media, { ...media, variants });
+          }).catch(() => {});
+        }
       },
-      minDuration: 8,
+      onRemoved: (id) => { markEligible(id, false); eligibility.delete(id); overlayManager.removeOverlay(id); },
+      onVisibility: (id, visible) => {
+        overlayManager.setVisibility(id, visible);
+        if (!visible || detector.detected.get(id)?.protocol === 'webpage') markEligible(id, visible);
+      },
       observeDOM: true,
     });
-
+    detector.setEnabled(false);
     if (!isYoutubeHost(location.href)) detector.start();
+    const refreshDetection = async () => {
+      const state = await browser.runtime.sendMessage({ type: 'media-discovery-ready',
+        document_id: discoveryDocumentId() }).catch(() => null) as { enabled?: boolean } | null;
+      detector.setEnabled(!!state?.enabled && !isYoutubeHost(location.href));
+    };
+    const unwatchDetection = settingsStorage.watch(() => { void refreshDetection(); });
+    void refreshDetection();
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { detector.retryUnresolved(true); void refreshDetection(); }
+    });
 
     // ========================================================================
     // MAIN-world media hook listener
@@ -465,11 +486,11 @@ export default defineContentScript({
       if (event.source !== window) return;
       if (isYoutubeHost(location.href) || !event.data || event.data.source !== 'dlman-media-hook') return;
 
-      const { type: msgType, url, protocol } = event.data;
+      const { type: msgType, url, protocol, blobUrl } = event.data;
 
-      if (msgType === 'media-url-detected' && url) {
+      if (msgType === 'media-url-detected' && typeof url === 'string' && ['direct', 'hls', 'dash'].includes(protocol)) {
         // The MAIN-world hook detected a media URL via fetch/XHR interception
-        detector.injectStreamUrl(url, protocol);
+        detector.injectStreamUrl(url, protocol, typeof blobUrl === 'string' ? blobUrl : undefined);
       }
 
       if (msgType === 'mse-blob-created') {
@@ -483,10 +504,15 @@ export default defineContentScript({
     // Messages from background: stream detection + context menu video lookup
     // ========================================================================
 
+    let networkDocumentId: string | undefined;
     browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-      const msg = message as { type: string; url?: string; protocol?: string; x?: number; y?: number };
+      const msg = message as { type: string; url?: string; protocol?: string; documentId?: string; x?: number; y?: number };
+      if (msg.type === 'media-discovery-retry') {
+        detector.retryUnresolved(); void refreshDetection(); sendResponse({ ok: true }); return true;
+      }
 
       if (msg.type === 'stream-detected' && msg.url && !isYoutubeHost(location.href)) {
+        if (networkDocumentId && msg.documentId && msg.documentId !== networkDocumentId) return true;
         // Background's webRequest detected a stream URL — inject it into the detector
         // Pass protocol hint if background already classified it
         detector.injectStreamUrl(msg.url, msg.protocol as any);
@@ -508,6 +534,13 @@ export default defineContentScript({
         if (!media) {
           media = detector.getAnyDetectedMedia();
         }
+        if (media?.protocol === 'webpage') {
+          void resolveWebpageMedia(media, media.discovery_status === 'failed').then((resolved) => {
+            sendResponse({ request: { media: resolved, inspection_id: resolved.inspection_id,
+              web_media_selection: resolved.variants[0]?.web_media_selection } });
+          }).catch(() => sendResponse({ request: null }));
+          return true;
+        }
         if (media) {
           const request: MediaDownloadRequest = {
             media,
@@ -523,6 +556,11 @@ export default defineContentScript({
       return true; // Keep the channel available for the other message listeners.
     });
 
+    browser.runtime.sendMessage({ type: 'content-script-ready' }).then((response) => {
+      networkDocumentId = (response as { documentId?: string })?.documentId;
+    }).catch(() => {});
+    window.postMessage({ source: 'dlman-content', type: 'media-hook-ready' }, '*');
+
     // Store last right-click position for context menu video lookup
     document.addEventListener('contextmenu', (e) => {
       // Save last right-click coordinates in extension storage for the background
@@ -531,11 +569,22 @@ export default defineContentScript({
       });
     });
 
-    // Clean up on page unload
-    window.addEventListener('beforeunload', () => {
-      youtubeController.destroy();
-      detector.destroy();
-      overlayManager.destroy();
+    // Preserve detection across BFCache restoration; terminate on actual teardown.
+    let cleaned = false;
+    const stopDiscovery = () => {
+      void browser.runtime.sendMessage({ type: 'media-discovery-stop', document_id: discoveryDocumentId() }).catch(() => {});
+    };
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      unwatchDetection(); stopDiscovery();
+      youtubeController.destroy(); detector.destroy(); overlayManager.destroy();
+    };
+    ctx.onInvalidated(cleanup);
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) { detector.setEnabled(false); stopDiscovery(); }
+      else cleanup();
     });
+    window.addEventListener('pageshow', (event) => { if (event.persisted && !cleaned) void refreshDetection(); });
   },
 });
