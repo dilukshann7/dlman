@@ -181,7 +181,7 @@ impl DownloadDatabase {
             sqlx::query("ALTER TABLE downloads ADD COLUMN youtube TEXT").execute(pool).await?;
         }
 
-        for column in ["source_page_url", "segment_cache_dir"] {
+        for column in ["source_page_url", "segment_cache_dir", "web_media"] {
             if !columns.iter().any(|row| row.get::<String, _>("name") == column) {
                 sqlx::query(&format!("ALTER TABLE downloads ADD COLUMN {column} TEXT"))
                     .execute(pool).await?;
@@ -212,8 +212,8 @@ impl DownloadDatabase {
                 id, url, final_url, filename, destination, size, downloaded,
                 status, queue_id, category_id, color, error, speed_limit,
                 created_at, completed_at, retry_count, etag, last_modified, supports_range,
-                cookies, youtube, source_page_url, segment_cache_dir
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cookies, youtube, source_page_url, segment_cache_dir, web_media
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 final_url = excluded.final_url,
@@ -235,7 +235,8 @@ impl DownloadDatabase {
                 cookies = excluded.cookies,
                 youtube = excluded.youtube,
                 source_page_url = excluded.source_page_url,
-                segment_cache_dir = excluded.segment_cache_dir
+                segment_cache_dir = excluded.segment_cache_dir,
+                web_media = excluded.web_media
             "#,
         )
         .bind(download.id.to_string())
@@ -261,6 +262,7 @@ impl DownloadDatabase {
         .bind(download.youtube.as_ref().map(|value| value.to_string()))
         .bind(download.source_page_url.as_ref())
         .bind(download.segment_cache_dir.as_ref().map(|p| p.to_string_lossy().to_string()))
+        .bind(download.web_media.as_ref().map(|value| value.to_string()))
         .execute(&mut *tx)
         .await?;
         
@@ -906,6 +908,7 @@ fn row_to_download(row: sqlx::sqlite::SqliteRow, segments: Vec<Segment>) -> Resu
         retry_count: row.get::<i64, _>("retry_count") as u32,
         cookies: row.get("cookies"),
         youtube: row.get::<Option<String>, _>("youtube").map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))),
+        web_media: row.get::<Option<String>, _>("web_media").map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))),
     })
 }
 

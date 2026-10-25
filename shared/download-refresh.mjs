@@ -1,5 +1,5 @@
 export function canRefreshDownload(download) {
-  if (!download || !['paused', 'failed'].includes(download.status) || download.youtube != null) return false;
+  if (!download || !['paused', 'failed'].includes(download.status) || download.youtube != null || download.web_media != null) return false;
   try {
     const url = new URL(download.url);
     const host = url.hostname.toLowerCase();

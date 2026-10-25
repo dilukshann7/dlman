@@ -5,6 +5,8 @@
 
 mod youtube;
 pub use youtube::*;
+mod web_media;
+pub use web_media::*;
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,9 @@ pub struct Download {
     /// Optional provider job data, parsed independently for each download.
     #[serde(default)]
     pub youtube: Option<serde_json::Value>,
+    /// Generic media job metadata. Playback credentials and signed stream URLs stay in memory.
+    #[serde(default)]
+    pub web_media: Option<serde_json::Value>,
 }
 
 impl Download {
@@ -91,6 +96,7 @@ impl Download {
             retry_count: 0,
             cookies: None,
             youtube: None,
+            web_media: None,
         }
     }
 
@@ -731,6 +737,8 @@ pub struct DetectedMedia {
 /// Request from extension to download a media stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaDownloadRequest {
+    #[serde(default)]
+    pub media_quality: Option<WebMediaQualityHint>,
     #[serde(default)]
     pub youtube_selection: Option<YoutubeSelection>,
     #[serde(default)]

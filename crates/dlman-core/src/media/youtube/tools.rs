@@ -167,6 +167,34 @@ impl MediaTools {
         serde_json::from_slice(&bytes)
             .map_err(|_| media_error("The media tool returned invalid metadata."))
     }
+
+    pub async fn metadata_context(
+        &self,
+        context: &crate::media::web::WebMediaContext,
+        proxy: &ProxySettings,
+        cancel: CancellationToken,
+    ) -> Result<Value, DlmanError> {
+        let mut args = self.args(proxy)?;
+        let (headers, _cookie_file) = context.tool_args()?;
+        args.extend(headers);
+        args.extend([
+            "--dump-single-json".into(),
+            "--skip-download".into(),
+            "--no-warnings".into(),
+            "--".into(),
+            context.url.clone(),
+        ]);
+        let bytes = capture(
+            &self.yt_dlp,
+            &args,
+            cancel,
+            Duration::from_secs(150),
+            8 * 1024 * 1024,
+        )
+        .await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| media_error("The media tool returned invalid metadata."))
+    }
 }
 
 fn tool_error() -> DlmanError {

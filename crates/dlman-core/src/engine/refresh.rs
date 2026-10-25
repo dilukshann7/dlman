@@ -35,7 +35,7 @@ pub fn eligible(download: &Download) -> bool {
     matches!(
         download.status,
         DownloadStatus::Paused | DownloadStatus::Failed
-    ) && download.youtube.is_none()
+    ) && download.youtube.is_none() && download.web_media.is_none()
         && ordinary_url(&download.url)
 }
 

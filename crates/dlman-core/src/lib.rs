@@ -75,6 +75,7 @@ pub struct DlmanCore {
     /// Used for pause/cancel — abort_handle kills all in-flight segment requests.
     hls_tasks: Arc<RwLock<HashMap<Uuid, HlsTaskHandle>>>,
     pub youtube: Arc<media::youtube::YoutubeService>,
+    pub web_media: Arc<media::web::WebMediaService>,
     youtube_data_dir: PathBuf,
 }
 
@@ -88,6 +89,7 @@ impl DlmanCore {
     pub async fn new_with_media_tools(data_dir: PathBuf, media_tools: Option<PathBuf>) -> Result<Self, DlmanError> {
         let youtube = Arc::new(media::youtube::YoutubeService::default());
         if let Some(root) = media_tools { youtube.configure(root); }
+        let web_media = Arc::new(media::web::WebMediaService::new(youtube.clone()));
         // Create event channel
         let (event_tx, _) = broadcast::channel(1000);
         
@@ -125,6 +127,7 @@ impl DlmanCore {
             event_tx,
             hls_tasks: Arc::new(RwLock::new(HashMap::new())),
             youtube,
+            web_media,
             youtube_data_dir: data_dir.clone(),
         };
         
@@ -271,7 +274,11 @@ impl DlmanCore {
         // Safety net: redirect streaming URLs to the HLS/DASH pipeline.
         if is_streaming_url(url) {
             info!("[add_download] Intercepted streaming URL → HLS pipeline");
-            return self.download_hls_stream(url, None, None, None, cookies, None, auto_start).await;
+            let context = cookies.map(|cookies| media::web::WebMediaContext {
+                url: url.into(), referrer: None, user_agent: None,
+                cookies: vec![], cookie_header: Some(cookies),
+            });
+            return self.add_web_stream_download(url, destination, queue_id, category_id, None, context, auto_start).await;
         }
 
         // Validate URL
@@ -364,7 +371,7 @@ impl DlmanCore {
     /// Pause a download (works for both regular and HLS/DASH downloads)
     pub async fn pause_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let download = self.get_download(id).await?;
-        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+        if (download.youtube.is_some() || download.web_media.is_some()) || media::youtube::is_youtube_host(&download.url) {
             return self.stop_youtube(id, DownloadStatus::Paused).await;
         }
         // Check if this is an active HLS streaming download
@@ -404,7 +411,7 @@ impl DlmanCore {
     /// Resume a download
     pub async fn resume_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let download = self.get_download(id).await?;
-        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+        if (download.youtube.is_some() || download.web_media.is_some()) || media::youtube::is_youtube_host(&download.url) {
             return self.start_youtube(id).await;
         }
 
@@ -458,7 +465,7 @@ impl DlmanCore {
     /// Cancel a download (works for both regular and HLS/DASH downloads)
     pub async fn cancel_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let download = self.get_download(id).await?;
-        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+        if (download.youtube.is_some() || download.web_media.is_some()) || media::youtube::is_youtube_host(&download.url) {
             return self.stop_youtube(id, DownloadStatus::Cancelled).await;
         }
         // Check if there's an active HLS task — abort it forcefully
@@ -498,7 +505,7 @@ impl DlmanCore {
     pub async fn retry_download(&self, id: Uuid) -> Result<(), DlmanError> {
         let operation = self.download_manager.edit_guard(id).await?;
         let mut download = self.get_download(id).await?;
-        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+        if (download.youtube.is_some() || download.web_media.is_some()) || media::youtube::is_youtube_host(&download.url) {
             return self.start_youtube(id).await;
         }
 
@@ -574,7 +581,7 @@ impl DlmanCore {
     /// Delete a download
     pub async fn delete_download(&self, id: Uuid, delete_file: bool) -> Result<(), DlmanError> {
         let download = self.get_download(id).await?;
-        if download.youtube.is_some() || media::youtube::is_youtube_host(&download.url) {
+        if (download.youtube.is_some() || download.web_media.is_some()) || media::youtube::is_youtube_host(&download.url) {
             self.stop_youtube(id, DownloadStatus::Cancelled).await?;
             let download = self.get_download(id).await?;
             // Keep incomplete media staging recoverable; removing a history row never
@@ -599,7 +606,7 @@ impl DlmanCore {
     ) -> Result<(), DlmanError> {
         // Get download to find its queue
         let download = self.get_download(id).await?;
-        if download.youtube.is_some() {
+        if (download.youtube.is_some() || download.web_media.is_some()) {
             let active = download.status == DownloadStatus::Downloading;
             if active { self.stop_youtube(id, DownloadStatus::Paused).await?; }
             let mut download = self.get_download(id).await?;
@@ -656,7 +663,7 @@ impl DlmanCore {
     pub async fn update_queue(&self, id: Uuid, options: QueueOptions) -> Result<Queue, DlmanError> {
         let queue = self.queue_manager.update_queue(id, options).await?;
         for download in self.get_all_downloads().await? {
-            if download.queue_id == id && download.youtube.is_some() && download.speed_limit.is_none()
+            if download.queue_id == id && (download.youtube.is_some() || download.web_media.is_some()) && download.speed_limit.is_none()
                 && download.status == DownloadStatus::Downloading {
                 self.stop_youtube(download.id, DownloadStatus::Paused).await?;
                 self.start_youtube(download.id).await?;
@@ -791,7 +798,7 @@ impl DlmanCore {
         for id in ids {
             let operation = self.download_manager.edit_guard(id).await?;
             let download = self.get_download(id).await?;
-            let restart_youtube = download.youtube.is_some() && download.status == DownloadStatus::Downloading;
+            let restart_youtube = (download.youtube.is_some() || download.web_media.is_some()) && download.status == DownloadStatus::Downloading;
             if restart_youtube {
                 self.stop_youtube(id, DownloadStatus::Paused).await?;
             }
@@ -910,7 +917,16 @@ impl DlmanCore {
         referrer: Option<String>,
         auto_start: bool,
     ) -> Result<Download, DlmanError> {
-        self.download_hls_stream_with_id(None, master_url, variant_index, filename, page_title, cookies, referrer, auto_start).await
+        // Legacy callers did not carry a destination or queue. Preserve their defaults.
+        // Both protocols now use the verified media tools, including DASH audio merging.
+        let _ = (variant_index, page_title);
+        let settings = self.get_settings().await;
+        let context = Some(media::web::WebMediaContext {
+            url: master_url.into(), referrer, user_agent: None,
+            cookies: vec![], cookie_header: cookies,
+        });
+        self.add_web_stream_download(master_url, settings.default_download_path,
+            Uuid::nil(), None, filename, context, auto_start).await
     }
 
     /// Core HLS/DASH download implementation.
