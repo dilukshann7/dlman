@@ -159,9 +159,23 @@ impl BrowserServer {
             .route("/api/media/download", post(handle_media_download))
             .route("/api/media/inspect", post(handle_youtube_inspect))
             .route("/api/media/inspect/:id", get(handle_youtube_inspection))
+            .route("/api/web-media/inspect", post(handle_web_media_inspect)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
+            .route("/api/web-media/inspect/:id", get(handle_web_media_inspection))
+            .route("/api/web-media/download", post(handle_web_media_download)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
             .route("/api/media/verify", post(handle_youtube_verification)
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)))
             .route("/api/media/verify/:id/cancel", post(handle_cancel_youtube_verification))
+            // Explicit browser capture returns sources only; it never emits a download dialog.
+            .route("/web-media-capture", get(handle_web_media_capture_bridge))
+            .route("/api/web-media/capture/:id", get(handle_web_media_capture_status))
+            .route("/api/web-media/capture/:id/claim", post(handle_web_media_capture_claim)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+            .route("/api/web-media/capture/:id/sources", post(handle_web_media_capture_sources)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+            .route("/api/web-media/capture/:id/cancel", post(handle_web_media_capture_cancel)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
             // WebSocket for real-time events (optional)
             .route("/ws", get(handle_websocket))
             .layer(cors)
@@ -194,6 +208,142 @@ impl BrowserServer {
 // ============================================================================
 
 type SharedState = Arc<RwLock<ServerState>>;
+
+type CaptureHttpError = (axum::http::StatusCode, &'static str);
+
+async fn handle_web_media_inspect(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::WebMediaInspectRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<dlman_types::WebMediaInspection>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid webpage inspection."))?;
+    let core = state.read().await.core.clone();
+    let proxy = core.get_settings().await.proxy;
+    // Background discovery is anonymous, even when saved site credentials exist.
+    core.web_media.inspect_automatic(&request.url, proxy).await.map(axum::Json)
+        .map_err(|error| {
+            let message = error.to_string();
+            if message.contains("inspection is busy") || message.contains("inspections are already running") {
+                (axum::http::StatusCode::TOO_MANY_REQUESTS, "Automatic video inspection is busy.")
+            } else {
+                (axum::http::StatusCode::BAD_REQUEST, "Video inspection is unavailable. Retry shortly or start playback.")
+            }
+        })
+}
+
+async fn handle_web_media_inspection(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<dlman_types::WebMediaInspection>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let core = state.read().await.core.clone();
+    core.web_media.inspection(id).await.map(axum::Json)
+        .map_err(|_| (axum::http::StatusCode::NOT_FOUND, "Video preview expired. Inspect the webpage again."))
+}
+
+async fn handle_web_media_download(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::WebMediaDownloadRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<ControlResponse>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid video selection."))?;
+    let state = state.read().await;
+    let (preview, _) = state.core.web_media.validate_preview(request.inspection_id, &request.url, &request.selection).await
+        .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Video selection changed or expired. Refresh the quality list."))?;
+    let payload = serde_json::json!({
+        "url": request.url,
+        "media_protocol": "webpage",
+        "media_page_title": preview.title,
+        "web_media_selection": request.selection,
+        "inspection_id": request.inspection_id,
+    });
+    state.app_handle.emit("show-new-download-dialog", payload)
+        .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Could not open the download dialog."))?;
+    request_attention(&state.app_handle);
+    Ok(axum::Json(ControlResponse { success: true, error: None }))
+}
+
+/// The fragment ticket is read only by the extension content script. This page has
+/// no remote scripts and no destination links that could leak it in a referrer.
+async fn handle_web_media_capture_bridge() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        axum::response::Html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>DLMan browser video detection</title><body style=\"font:18px system-ui;max-width:680px;margin:80px auto;padding:24px\"><h1>DLMan browser video detection</h1><p>The DLMan extension will open your requested video page in this tab. Play the video there, then return to DLMan to select a source and quality.</p><p>If this page stays open, enable the DLMan extension in this browser and retry Detect in browser. Private browsing and disabled sites are not supported.</p></body></html>"),
+    )
+}
+
+fn validate_capture_origin(headers: &axum::http::HeaderMap) -> Result<(), CaptureHttpError> {
+    if let Some(value) = headers.get(header::ORIGIN) {
+        let origin = value.to_str().map_err(|_| (axum::http::StatusCode::FORBIDDEN, "Use the DLMan extension for browser capture."))?;
+        // Match a complete extension origin, not a prefix that also accepts paths,
+        // credentials, suffixes or an opaque/null web origin.
+        let host = origin.strip_prefix("chrome-extension://").or_else(|| origin.strip_prefix("moz-extension://"));
+        if !host.is_some_and(|host| !host.is_empty() && host.len() <= 128 && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')) {
+            return Err((axum::http::StatusCode::FORBIDDEN, "Use the DLMan extension for browser capture."));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_web_media_capture_status(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<dlman_types::WebMediaCapture>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let core = state.read().await.core.clone();
+    core.web_media.capture(id).await.map(axum::Json)
+        .map_err(|_| (axum::http::StatusCode::NOT_FOUND, "Browser capture is unavailable or expired."))
+}
+
+async fn handle_web_media_capture_claim(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::WebMediaCaptureClaim>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<dlman_types::WebMediaCapture>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid browser capture claim."))?;
+    let core = state.read().await.core.clone();
+    core.web_media.claim_capture(id, request).await.map(axum::Json)
+        .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Browser capture could not be claimed. Start again in DLMan."))
+}
+
+async fn handle_web_media_capture_sources(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::WebMediaCaptureSubmission>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<dlman_types::WebMediaCapture>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    // Never echo deserialization diagnostics: the payload includes temporary cookies.
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid browser capture sources."))?;
+    let core = state.read().await.core.clone();
+    core.web_media.submit_capture(id, request).await.map(axum::Json)
+        .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Browser capture sources were rejected. Keep the original page open and retry."))
+}
+
+async fn handle_web_media_capture_cancel(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+    request: Result<axum::Json<dlman_types::WebMediaCaptureClaim>, axum::extract::rejection::JsonRejection>,
+) -> Result<axum::Json<ControlResponse>, CaptureHttpError> {
+    validate_capture_origin(&headers)?;
+    let axum::Json(request) = request.map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid browser capture cancellation."))?;
+    let core = state.read().await.core.clone();
+    core.web_media.cancel_capture_claim(id, request).await
+        .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Browser capture could not be cancelled."))?;
+    Ok(axum::Json(ControlResponse { success: true, error: None }))
+}
 
 /// Helper: activate the app window for browser download dialogs.
 fn request_attention(app_handle: &AppHandle) {
@@ -559,6 +709,7 @@ async fn handle_media_download(
         "filename": filename,
         "cookies": if req.media.protocol == MediaProtocol::Youtube { None } else { req.media.cookies },
         "youtube_selection": req.youtube_selection,
+        "media_quality": req.media_quality,
         "inspection_id": req.inspection_id,
         // Pass media metadata for HLS/DASH so the start command has full context
         "media_protocol": format!("{:?}", req.media.protocol).to_lowercase(),

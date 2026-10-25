@@ -161,6 +161,12 @@ pub fn run() {
             commands::cancel_youtube_verification,
             commands::get_youtube_inspection,
             commands::start_youtube_download,
+            commands::inspect_web_media,
+            commands::get_web_media_inspection,
+            commands::start_web_media_download,
+            commands::begin_web_media_capture,
+            commands::get_web_media_capture,
+            commands::cancel_web_media_capture,
             // Queue commands
             commands::get_queues,
             commands::create_queue,
@@ -203,6 +209,7 @@ pub fn run() {
                         let core = state.core.read().await.clone();
                         if let Some(core) = core {
                             let _ = core.pause_all_downloads().await;
+                            core.web_media.shutdown().await;
                             core.youtube.shutdown().await;
                         }
                     });

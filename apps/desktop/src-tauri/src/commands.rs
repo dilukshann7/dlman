@@ -19,19 +19,6 @@ pub struct ProbedInfo {
     pub final_url: Option<String>,
 }
 
-/// Detect if a URL points to an HLS/DASH manifest.
-fn is_streaming_url(url: &str) -> Option<&'static str> {
-    // Check path component (ignore query params) for manifest extensions
-    let path = url.split('?').next().unwrap_or(url).to_lowercase();
-    if path.ends_with(".m3u8") || path.contains(".m3u8/") {
-        Some("hls")
-    } else if path.ends_with(".mpd") || path.contains(".mpd/") {
-        Some("dash")
-    } else {
-        None
-    }
-}
-
 #[tauri::command(rename_all = "snake_case")]
 pub async fn add_download(
     state: State<'_, AppState>,
@@ -45,26 +32,7 @@ pub async fn add_download(
     source_page_url: Option<String>,
 ) -> Result<Download, String> {
     tracing::info!("[add_download] URL={} start_later={:?}", &url, start_later);
-    // Auto-detect HLS/DASH streaming URLs and route to the streaming pipeline.
-    if let Some(_protocol) = is_streaming_url(&url) {
-        let filename = probed_info.as_ref().and_then(|p| p.filename.clone());
-        let auto_start = !start_later.unwrap_or(false);
-        return state
-            .with_core_async(|core| async move {
-                core.download_hls_stream(
-                    &url,
-                    None,
-                    filename,
-                    None,
-                    cookies.clone(),
-                    None,
-                    auto_start,
-                )
-                .await
-            })
-            .await;
-    }
-
+    // The core preserves destination, queue and category when routing manifest URLs.
     let queue_uuid = Uuid::parse_str(&queue_id).map_err(|e| e.to_string())?;
     let category_uuid = category_id.map(|s| Uuid::parse_str(&s).map_err(|e| e.to_string())).transpose()?;
     let dest_path = PathBuf::from(destination);
@@ -85,6 +53,11 @@ pub async fn add_download(
                     .as_deref()
                     .and_then(dlman_core::filename::sanitize_filename)
                 {
+                    let filename = if let Some(job) = download.web_media.clone() {
+                        let job: dlman_types::WebMediaJob = serde_json::from_value(job)
+                            .map_err(|_| dlman_core::DlmanError::InvalidOperation("Invalid stored video selection.".into()))?;
+                        dlman_core::media::youtube::safe_web_filename(&filename, &job.selection.container)?
+                    } else { filename };
                     let filename = core
                         .unique_filename(&download.destination, &filename, Some(download.id))
                         .await;
@@ -327,6 +300,73 @@ pub async fn start_youtube_download(state: State<'_, AppState>, url: String, ins
     }).await
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub async fn inspect_web_media(
+    state: State<'_, AppState>, url: String, capture_id: Option<String>, source_id: Option<String>,
+    referrer: Option<String>, cookies: Option<String>, page_title: Option<String>, master_url: Option<String>,
+) -> Result<dlman_types::WebMediaInspection, String> {
+    let capture_id = capture_id.map(|id| Uuid::parse_str(&id)).transpose().map_err(|_| "Invalid capture ID")?;
+    let _ = page_title;
+    let probe_url = master_url.clone().unwrap_or_else(|| url.clone());
+    let context = if referrer.is_some() || cookies.is_some() || master_url.is_some() {
+        Some(dlman_core::media::web::legacy_context(&probe_url, referrer, cookies).map_err(|e| e.to_string())?)
+    } else { None };
+    state.with_core_async(|core| async move {
+        let proxy = core.get_settings().await.proxy;
+        // Saved site credentials are used only for classifying an ordinary file.
+        // They are never passed to webpage extraction or the browser capture flow.
+        let credentials = if capture_id.is_none() {
+            core.download_manager.db().find_credentials_for_url(&probe_url).await?
+                .into_iter().find(|credential| credential.enabled)
+                .map(|credential| (credential.username, credential.password))
+        } else { None };
+        core.web_media.inspect_with_probe_credentials(&url, proxy, capture_id, source_id, context, credentials).await
+    }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_web_media_inspection(state: State<'_, AppState>, id: String) -> Result<dlman_types::WebMediaInspection, String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid inspection ID")?;
+    state.with_core_async(|core| async move { core.web_media.inspection(id).await }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn start_web_media_download(
+    state: State<'_, AppState>, url: String, inspection_id: String,
+    selection: dlman_types::WebMediaSelection, destination: String, queue_id: String,
+    category_id: Option<String>, filename: Option<String>, start_later: Option<bool>,
+) -> Result<Download, String> {
+    let inspection_id = Uuid::parse_str(&inspection_id).map_err(|_| "Invalid inspection ID")?;
+    let queue_id = Uuid::parse_str(&queue_id).map_err(|_| "Invalid queue ID")?;
+    let category_id = category_id.map(|id| Uuid::parse_str(&id)).transpose().map_err(|_| "Invalid category ID")?;
+    state.with_core_async(|core| async move {
+        core.add_web_media_download(&url, inspection_id, selection, PathBuf::from(destination), queue_id,
+            category_id, filename, !start_later.unwrap_or(false)).await
+    }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn begin_web_media_capture(state: State<'_, AppState>, url: String) -> Result<dlman_types::WebMediaCapture, String> {
+    state.with_core_async(|core| async move {
+        let mut capture = core.web_media.begin_capture(&url).await?;
+        let port = core.get_settings().await.browser_integration_port;
+        capture.bridge_url = Some(format!("http://127.0.0.1:{port}/web-media-capture#{}", capture.id));
+        Ok(capture)
+    }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_web_media_capture(state: State<'_, AppState>, id: String) -> Result<dlman_types::WebMediaCapture, String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid capture ID")?;
+    state.with_core_async(|core| async move { core.web_media.capture(id).await }).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn cancel_web_media_capture(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(|_| "Invalid capture ID")?;
+    state.with_core_async(|core| async move { core.web_media.cancel_capture(id).await; Ok(()) }).await
+}
+
 /// Start an HLS/DASH media download (called after user approves in dialog).
 /// This is the second half of the unified pipeline:
 /// 1. Extension sends media → server shows dialog (handle_media_download)
@@ -418,7 +458,7 @@ pub async fn update_download(
                 if core.download_manager.is_active(uuid).await {
                     return Err(dlman_core::DlmanError::InvalidOperation("Pause this download and wait for its workers to stop before changing its destination.".into()));
                 }
-                if download.youtube.is_some() && download.status == dlman_types::DownloadStatus::Downloading {
+                if (download.youtube.is_some() || download.web_media.is_some()) && download.status == dlman_types::DownloadStatus::Downloading {
                     return Err(dlman_core::DlmanError::InvalidOperation("Pause this YouTube download before changing its destination.".into()));
                 }
                 download.destination = PathBuf::from(destination);

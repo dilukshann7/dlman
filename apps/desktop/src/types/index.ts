@@ -25,6 +25,8 @@ export interface Download {
   retry_count?: number;
   /** Provider job metadata, present for YouTube transfers. */
   youtube?: unknown;
+  /** Inspected generic webpage or stream video transfer metadata. */
+  web_media?: unknown;
 }
 
 export type DownloadStatus =
