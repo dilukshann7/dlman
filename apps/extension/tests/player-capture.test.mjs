@@ -11,7 +11,7 @@ registerHooks({
     return next(specifier, context);
   },
 });
-const { default: content } = await import('../src/entrypoints/web-media-capture.ts');
+const { default: content } = await import('../src/entrypoints/web-media-capture.content.ts');
 
 test('claimed content script captures unloaded HTML5 qualities and inline KVS configuration', async (context) => {
   const dom = domHarness(context, '<video preload="none"><source src="https://cdn.example/get_file/42_720p.mp4/" type="video/mp4" label="720p"><source src="https://cdn.example/get_file/42_480p.mp4/" type="video/mp4" label="480p"></video><script>var flashvars = {video_url:"https://cdn.example/get_file/42_1080p.mp4/?v-acctoken=temporary",video_url_text:"1080p"};</script>');

@@ -476,7 +476,7 @@ export default defineContentScript({
     // ========================================================================
     // MAIN-world media hook listener
     //
-    // The early content script (content-early.ts) injects media-hook.js into
+    // The early content script (content-early.content.ts) injects media-hook.js into
     // the MAIN world at document_start. That script hooks fetch(), XHR,
     // URL.createObjectURL(MediaSource), and SourceBuffer — and communicates
     // back to us here via window.postMessage().
