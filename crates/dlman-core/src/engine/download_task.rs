@@ -21,6 +21,9 @@ mod segmented;
 #[cfg(test)]
 #[path = "dynamic_tests.rs"]
 mod dynamic_tests;
+#[cfg(test)]
+#[path = "transfer_tests.rs"]
+mod transfer_tests;
 use tracing::{error, info, warn};
 
 /// Resolve the scratch directory for a download's partial segment files,
@@ -425,6 +428,48 @@ impl DownloadTask {
     
     /// Download with a single segment
     async fn download_single_segment(&mut self) -> Result<(), DlmanError> {
+        let mut retries = 0;
+        loop {
+            let error = match self.download_single_attempt().await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            // The worker checkpoints before returning. Reload only its range
+            // state; concurrent user metadata remains owned by the database.
+            let saved = self
+                .db
+                .load_download(self.download.id)
+                .await?
+                .ok_or(DlmanError::NotFound(self.download.id))?;
+            self.download.segments = saved.segments;
+            self.download.size = saved.size;
+            self.reconcile_segments().await?;
+            self.publish_range_map().await?;
+            if !error.is_retryable() || retries >= self.max_retries {
+                return Err(error);
+            }
+            retries += 1;
+            let delay =
+                tokio::time::sleep(std::time::Duration::from_secs(self.retry_delay_secs as u64));
+            tokio::pin!(delay);
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                if self.paused.load(Ordering::Acquire) {
+                    self.cancelled.store(true, Ordering::Release);
+                    return Err(DlmanError::Paused);
+                }
+                if self.cancelled.load(Ordering::Acquire) {
+                    return Err(DlmanError::Cancelled);
+                }
+                tokio::select! {
+                    _ = &mut delay => break,
+                    _ = tick.tick() => {}
+                }
+            }
+        }
+    }
+
+    async fn download_single_attempt(&mut self) -> Result<(), DlmanError> {
         let segment = self.download.segments[0].clone();
         
         // Check if already complete
