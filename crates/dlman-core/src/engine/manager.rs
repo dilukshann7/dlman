@@ -59,11 +59,18 @@ pub fn build_http_client(proxy_settings: Option<&ProxySettings>) -> Result<Clien
     build_client(proxy_settings, true)
 }
 
-fn build_client(proxy_settings: Option<&ProxySettings>, redirects: bool) -> Result<Client, DlmanError> {
-    let mut builder = Client::builder()
+pub(super) fn http_client_builder(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> reqwest::ClientBuilder {
+    Client::builder()
         .user_agent(crate::USER_AGENT)
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(120));
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+}
+
+fn build_client(proxy_settings: Option<&ProxySettings>, redirects: bool) -> Result<Client, DlmanError> {
+    let mut builder = http_client_builder(Duration::from_secs(30), Duration::from_secs(120));
     
     if !redirects { builder = builder.redirect(reqwest::redirect::Policy::none()); }
 
