@@ -9,7 +9,7 @@ use dlman_types::*;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Semaphore};
@@ -96,7 +96,7 @@ pub struct WebMediaService {
     // Native ownership keeps the automatic limit intact across MV3 worker restarts.
     automatic_inspection: Mutex<Option<Uuid>>,
     slots: Arc<Semaphore>,
-    shutdown: CancellationToken,
+    shutdown: StdRwLock<CancellationToken>,
 }
 
 impl WebMediaService {
@@ -108,7 +108,7 @@ impl WebMediaService {
             inspection_tasks: Mutex::new(HashMap::new()),
             automatic_inspection: Mutex::new(None),
             slots: Arc::new(Semaphore::new(2)),
-            shutdown: CancellationToken::new(),
+            shutdown: StdRwLock::new(CancellationToken::new()),
         }
     }
 
@@ -164,7 +164,8 @@ impl WebMediaService {
         legacy_context: Option<WebMediaContext>,
         probe_credentials: Option<(String, String)>,
     ) -> Result<WebMediaInspection, DlmanError> {
-        if self.shutdown.is_cancelled() {
+        let work = self.youtube.admission.enter()?;
+        if self.shutdown_token().is_cancelled() {
             return Err(error("Media inspection is shutting down."));
         }
         let page = canonical_url(value)?;
@@ -250,24 +251,25 @@ impl WebMediaService {
         let service = self.clone();
         // Hold the task registry while spawning so shutdown cannot miss a new task.
         let mut tasks = self.inspection_tasks.lock().await;
-        if self.shutdown.is_cancelled() {
+        if self.shutdown_token().is_cancelled() {
             self.inspections.lock().await.remove(&id);
             return Err(error("Media inspection is shutting down."));
         }
         tasks.retain(|_, task| !task.is_finished());
         let task = tokio::spawn(async move {
+            let _work = work;
             let _permit = permit;
             let inspected = async {
                 let resource = if captured { None } else if probe_credentials.is_some() {
-                    Some(probe::probe_with_credentials(&context, &proxy, service.shutdown.child_token(), probe_credentials.as_ref()).await?)
+                    Some(probe::probe_with_credentials(&context, &proxy, service.shutdown_token().child_token(), probe_credentials.as_ref()).await?)
                 } else {
-                    Some(probe::probe(&context, &proxy, service.shutdown.child_token()).await?)
+                    Some(probe::probe(&context, &proxy, service.shutdown_token().child_token()).await?)
                 };
                 drop(probe_credentials);
                 if !legacy_video_source && resource == Some(probe::ResourceKind::File) {
                     return Ok(None);
                 }
-                let value = service.youtube.extract_web_metadata(&context, &proxy, service.shutdown.child_token()).await?;
+                let value = service.youtube.extract_web_metadata(&context, &proxy, service.shutdown_token().child_token()).await?;
                 let mut preview = youtube::parse_web_preview(&page, &value)?;
                 preview.variants.retain(|variant| variant.output_mode == YoutubeOutput::Video);
                 if preview.variants.is_empty() { return Err(error("No supported on-demand video formats were found. Try Detect in browser while playing the video.")); }
@@ -361,7 +363,7 @@ impl WebMediaService {
     }
 
     pub async fn begin_capture(&self, url: &str) -> Result<WebMediaCapture, DlmanError> {
-        if self.shutdown.is_cancelled() {
+        if self.shutdown_token().is_cancelled() {
             return Err(error("Media capture is shutting down."));
         }
         self.captures.lock().await.begin(url)
@@ -395,7 +397,7 @@ impl WebMediaService {
     }
 
     pub async fn shutdown(&self) {
-        self.shutdown.cancel();
+        self.shutdown_token().cancel();
         let tasks: Vec<_> = self
             .inspection_tasks
             .lock()
@@ -408,6 +410,14 @@ impl WebMediaService {
         }
         self.inspections.lock().await.clear();
         self.captures.lock().await.clear();
+    }
+
+    fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.read().expect("Media shutdown lock poisoned").clone()
+    }
+
+    pub fn restart_after_update_failure(&self) {
+        *self.shutdown.write().expect("Media shutdown lock poisoned") = CancellationToken::new();
     }
 }
 

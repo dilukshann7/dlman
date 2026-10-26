@@ -74,6 +74,7 @@ pub(crate) struct YoutubeTask {
 }
 
 pub struct YoutubeService {
+    pub(crate) admission: crate::TransferAdmission,
     root: RwLock<Option<PathBuf>>,
     verification: Mutex<verification::VerificationStore>,
     inspections: Mutex<HashMap<Uuid, InspectionEntry>>,
@@ -81,12 +82,13 @@ pub struct YoutubeService {
     inspection_tasks: Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>,
     pub(crate) tasks: Mutex<HashMap<Uuid, YoutubeTask>>,
     pub(crate) controls: Mutex<()>,
-    shutdown: CancellationToken,
+    shutdown: RwLock<CancellationToken>,
 }
 
 impl Default for YoutubeService {
     fn default() -> Self {
         Self {
+            admission: crate::TransferAdmission::default(),
             root: RwLock::new(None),
             verification: Mutex::new(verification::VerificationStore::default()),
             inspections: Mutex::new(HashMap::new()),
@@ -94,12 +96,23 @@ impl Default for YoutubeService {
             inspection_tasks: Mutex::new(HashMap::new()),
             tasks: Mutex::new(HashMap::new()),
             controls: Mutex::new(()),
-            shutdown: CancellationToken::new(),
+            shutdown: RwLock::new(CancellationToken::new()),
         }
     }
 }
 
 impl YoutubeService {
+    pub fn with_admission(admission: crate::TransferAdmission) -> Self {
+        Self { admission, ..Self::default() }
+    }
+
+    fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.read().expect("Media shutdown lock poisoned").clone()
+    }
+
+    pub fn restart_after_update_failure(&self) {
+        *self.shutdown.write().expect("Media shutdown lock poisoned") = CancellationToken::new();
+    }
     pub async fn begin_verification(&self, url: &str) -> Result<YoutubeVerification, DlmanError> {
         self.verification.lock().await.begin(url)
     }
@@ -183,6 +196,7 @@ impl YoutubeService {
             ));
         }
         // Acquire before spawning: waiting HTTP requests must not create an unbounded queue.
+        let work = self.admission.enter()?;
         let permit = self.clone().slots_available()?;
         let id = Uuid::new_v4();
         let result = YoutubeInspection {
@@ -202,6 +216,7 @@ impl YoutubeService {
         );
         let service = self.clone();
         let task = tokio::spawn(async move {
+            let _work = work;
             let _permit = permit;
             let inspected = async {
                 let tools = service.tools()?;
@@ -209,7 +224,7 @@ impl YoutubeService {
                     .metadata(
                         &url,
                         &proxy,
-                        service.shutdown.child_token(),
+                        service.shutdown_token().child_token(),
                         session.as_deref(),
                     )
                     .await?;
@@ -290,7 +305,7 @@ impl YoutubeService {
     }
 
     pub async fn shutdown(&self) {
-        self.shutdown.cancel();
+        self.shutdown_token().cancel();
         let inspections: Vec<_> = self
             .inspection_tasks
             .lock()
@@ -398,6 +413,7 @@ impl DlmanCore {
     }
 
     pub(crate) async fn start_youtube(&self, id: Uuid) -> Result<(), DlmanError> {
+        let transfer = self.download_manager.admission.enter()?;
         let _control = self.youtube.controls.lock().await;
         let mut tasks = self.youtube.tasks.lock().await;
         if tasks.get(&id).is_some_and(|task| !task.join.is_finished()) {
@@ -469,6 +485,7 @@ impl DlmanCore {
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let join = tokio::spawn(async move {
+            let _transfer = transfer;
             let result = transfer::run(&core, download, job, token.clone()).await;
             if !token.is_cancelled() {
                 if let Err(error) = result {

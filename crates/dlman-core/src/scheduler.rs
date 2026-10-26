@@ -6,7 +6,7 @@
 use chrono::{Local, NaiveTime, Datelike, Weekday};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, Mutex, broadcast};
 use tokio::time::interval;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -16,6 +16,7 @@ use dlman_types::{CoreEvent, Queue, DownloadStatus};
 
 /// Scheduler that manages automatic queue start/stop based on time schedules
 pub struct QueueScheduler {
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Reference to queue manager
     queue_manager: Arc<QueueManager>,
     /// Cancellation flag
@@ -27,6 +28,7 @@ pub struct QueueScheduler {
 impl QueueScheduler {
     pub fn new(queue_manager: Arc<QueueManager>, event_tx: broadcast::Sender<CoreEvent>) -> Self {
         Self {
+            task: Mutex::new(None),
             queue_manager,
             running: Arc::new(RwLock::new(false)),
             event_tx,
@@ -35,6 +37,7 @@ impl QueueScheduler {
     
     /// Start the scheduler background task
     pub async fn start(&self, core: DlmanCore) {
+        let mut task = self.task.lock().await;
         let mut is_running = self.running.write().await;
         if *is_running {
             info!("Scheduler already running");
@@ -49,7 +52,7 @@ impl QueueScheduler {
         
         info!("Starting queue scheduler");
         
-        tokio::spawn(async move {
+        *task = Some(tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(30)); // Check every 30 seconds
             
             loop {
@@ -108,13 +111,19 @@ impl QueueScheduler {
                     }
                 }
             }
-        });
+        }));
     }
     
     /// Stop the scheduler
     pub async fn stop(&self) {
+        let mut task = self.task.lock().await;
         let mut running = self.running.write().await;
         *running = false;
+        drop(running);
+        if let Some(task) = task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         info!("Stopping queue scheduler");
     }
 }
