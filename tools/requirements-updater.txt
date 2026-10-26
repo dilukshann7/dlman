@@ -1,0 +1,2 @@
+# Ed25519 verification of Tauri/Minisign release signatures.
+cryptography>=43,<47

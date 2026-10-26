@@ -59,7 +59,8 @@
     },
     "resources": {
       "resources/media-tools/": "media-tools/"
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "shell": {
@@ -70,6 +71,15 @@
         "schemes": [
           "dlman"
         ]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk4QTQxMUYyQUUwOTE5NUUKUldSZUdRbXU4aEdrbUZsSndFT0Y0WTNjbnprdHVoRXdITjI0ZThzbVNHVGhFL2tBUWhYem5GTmEK",
+      "endpoints": [
+        "https://github.com/dilukshann7/dlman/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

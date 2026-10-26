@@ -52,7 +52,7 @@ indicatif = "0.17"
 console = "0.15"
 
 # Tauri
-tauri = { version = "2.0", features = [] }
+tauri = { version = "~2.10.0", features = [] }
 tauri-build = "2.0"
 
 # Internal crates

@@ -4,10 +4,10 @@
  */
 
 import { X, Download, Sparkles } from 'lucide-react';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { useUpdateStore } from '@/stores/update';
+import { useUIStore } from '@/stores/ui';
 import { cn } from '@/lib/utils';
 
 interface UpdateNotificationProps {
@@ -24,14 +24,7 @@ export function UpdateNotification({ className }: UpdateNotificationProps) {
     return null;
   }
   
-  const handleDownload = async () => {
-    try {
-      await openUrl(updateInfo.releaseUrl);
-    } catch (err) {
-      console.error('Failed to open URL:', err);
-      window.open(updateInfo.releaseUrl, '_blank');
-    }
-  };
+  const handleDownload = () => useUIStore.getState().setShowAboutDialog(true);
   
   return (
     <div

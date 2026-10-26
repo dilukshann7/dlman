@@ -1,73 +1,38 @@
-/**
- * Hook for checking app updates on startup
- * 
- * Checks for new versions once per session and updates the store
- * Also shows a toast notification if an update is available
- */
-
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { toast } from 'sonner';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
-import { checkForUpdates, getReleasesPageUrl } from '@/lib/version';
 import { useUpdateStore } from '@/stores/update';
 import { useSettingsStore } from '@/stores/settings';
-
-// Only check once per session
-let hasCheckedThisSession = false;
+import { useUIStore } from '@/stores/ui';
+import { startUpdateSchedule } from '@/lib/update-scheduler';
 
 export function useUpdateCheck() {
   const { t } = useTranslation();
-  const hasRun = useRef(false);
-  const { setUpdateInfo, setIsChecking, shouldShowNotification } = useUpdateStore();
-  const autoCheckUpdates = useSettingsStore((s) => s.settings.auto_check_updates);
-
-  useEffect(() => {
-    // Only run once per component mount and once per session
-    if (hasRun.current || hasCheckedThisSession) {
-      return;
-    }
-    
-    // Respect user setting
-    if (!autoCheckUpdates) {
-      return;
-    }
-    
-    hasRun.current = true;
-    hasCheckedThisSession = true;
-
-    // Check for updates after a short delay to not block app startup
-    const timer = setTimeout(async () => {
-      setIsChecking(true);
-      try {
-        const updateInfo = await checkForUpdates();
-        setUpdateInfo(updateInfo);
-
-        // Show toast only if notification not dismissed
-        if (updateInfo.hasUpdate && updateInfo.latestVersion) {
-          const store = useUpdateStore.getState();
-          if (store.shouldShowNotification()) {
-            toast.info(t('about.newVersion', { version: updateInfo.latestVersion }), {
-              description: t('update.clickToDownload'),
-              duration: 10000,
-              action: {
-                label: t('update.download'),
-                onClick: () => {
-                  openUrl(updateInfo.releaseUrl || getReleasesPageUrl());
-                }
-              }
-            });
-          }
-        }
-      } catch (err) {
-        // Silently fail - don't bother the user with update check errors
-        console.warn('Update check failed:', err);
-        setUpdateInfo(null);
-      } finally {
-        setIsChecking(false);
+  const loaded = useSettingsStore(state => state.loaded);
+  const enabled = useSettingsStore(state => state.settings.auto_check_updates);
+  const check = useUpdateStore(state => state.checkForUpdates);
+  const status = useUpdateStore(state => state.status);
+  const refreshReadiness = useUpdateStore(state => state.refreshReadiness);
+  useEffect(() => startUpdateSchedule({
+    loaded, enabled,
+    check: async () => {
+      await check();
+      const state = useUpdateStore.getState();
+      if (state.status === 'available' && state.shouldShowNotification()) {
+        toast.info(t('about.newVersion', { version: state.updateInfo?.latestVersion }), {
+          id: 'app-update-available', description: t('update.clickToDownload'), duration: 10000,
+          action: {
+            label: t('common.update'),
+            onClick: () => useUIStore.getState().setShowAboutDialog(true),
+          },
+        });
       }
-    }, 3000); // Check after 3 seconds
-
-    return () => clearTimeout(timer);
-  }, [setUpdateInfo, setIsChecking, shouldShowNotification]);
+    },
+  }), [loaded, enabled, check, t]);
+  useEffect(() => {
+    if (status !== 'ready') return;
+    void refreshReadiness();
+    const timer = setInterval(() => void refreshReadiness(), 1000);
+    return () => clearInterval(timer);
+  }, [status, refreshReadiness]);
 }
