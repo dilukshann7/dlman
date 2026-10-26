@@ -684,8 +684,16 @@
   },
   "update": {
     "available": "v{{version}} available",
-    "clickToDownload": "Click to download the latest version",
-    "download": "Download"
+    "clickToDownload": "Open updates to download the latest version",
+    "download": "Download Update",
+    "retryDownload": "Retry Download",
+    "downloading": "Downloading update: {{progress}}",
+    "installRestart": "Install and Restart",
+    "waitForDownloads": "Waiting for downloads and media processing to finish. Restart requires your confirmation.",
+    "installing": "Installing update…",
+    "packageManager": "Update DLMan using your package manager, or download a package from Releases.",
+    "manualInstall": "In-app installation is unavailable for this build. Download the matching installer from Releases.",
+    "releaseNotes": "Release notes and downloads"
   },
   "welcome": {
     "addDownload": "Add Download",

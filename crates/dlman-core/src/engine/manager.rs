@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 /// Download manager that coordinates all downloads
 pub struct DownloadManager {
+    pub admission: crate::TransferAdmission,
     /// Active download tasks
     pub(super) active_tasks: Arc<RwLock<HashMap<Uuid, DownloadTaskHandle>>>,
     pub(super) operation: Mutex<()>,
@@ -148,6 +149,7 @@ impl DownloadManager {
         let client = build_http_client(proxy_settings)?;
 
         Ok(Self {
+            admission: crate::TransferAdmission::default(),
             active_tasks: Arc::new(RwLock::new(HashMap::new())),
             client,
             scoped_client: build_client(proxy_settings, false)?,
@@ -351,6 +353,7 @@ impl DownloadManager {
         _credentials: Option<(String, String)>,
     ) -> Result<(), DlmanError> {
         let id = download.id;
+        let transfer = self.admission.enter()?;
         let _operation = self.edit_guard(id).await?;
         // A caller may have loaded a snapshot before a completed refresh.
         let download = self.db.load_download(id).await?.ok_or(DlmanError::NotFound(id))?;
@@ -427,6 +430,7 @@ impl DownloadManager {
         let stopped = tokio_util::sync::CancellationToken::new();
         let stopped_for_cleanup = stopped.clone();
         let task_handle = tokio::spawn(async move {
+            let _transfer = transfer;
             let result = task.run().await;
             // Probe/setup errors happen before the task's transfer error handler.
             if let Err(error) = &result {
@@ -497,6 +501,7 @@ impl DownloadManager {
         credentials: Option<(String, String)>,
     ) -> Result<(), DlmanError> {
         // Check if task is still running (might be if pause was very recent)
+        let _admission = self.admission.enter()?;
         {
             let tasks = self.active_tasks.read().await;
             if let Some(handle) = tasks.get(&id) {

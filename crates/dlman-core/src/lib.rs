@@ -14,6 +14,8 @@
 //! - Rate limiter shared across all downloads
 
 mod engine;
+mod admission;
+pub use admission::TransferAdmission;
 mod error;
 pub mod filename;
 pub mod media;
@@ -87,9 +89,6 @@ impl DlmanCore {
 
     /// Configure optional desktop resources before scheduled jobs can start.
     pub async fn new_with_media_tools(data_dir: PathBuf, media_tools: Option<PathBuf>) -> Result<Self, DlmanError> {
-        let youtube = Arc::new(media::youtube::YoutubeService::default());
-        if let Some(root) = media_tools { youtube.configure(root); }
-        let web_media = Arc::new(media::web::WebMediaService::new(youtube.clone()));
         // Create event channel
         let (event_tx, _) = broadcast::channel(1000);
         
@@ -98,6 +97,9 @@ impl DlmanCore {
         
         // Initialize download manager (includes SQLite DB)
         let download_manager = Arc::new(DownloadManager::new(data_dir.clone(), event_tx.clone()).await?);
+        let youtube = Arc::new(media::youtube::YoutubeService::with_admission(download_manager.admission.clone()));
+        if let Some(root) = media_tools { youtube.configure(root); }
+        let web_media = Arc::new(media::web::WebMediaService::new(youtube.clone()));
         
         // Load settings from SQLite database (single source of truth)
         let settings = download_manager.db().load_settings().await?;
@@ -149,6 +151,28 @@ impl DlmanCore {
     /// Emit an event
     pub fn emit(&self, event: CoreEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Called only while the updater holds exclusive transfer admission.
+    pub async fn shutdown_for_update(&self) {
+        self.scheduler.stop().await;
+        self.web_media.shutdown().await;
+        self.youtube.shutdown().await;
+    }
+
+    /// An installer error must leave the existing application usable.
+    pub async fn recover_after_update_failure(&self, admission: tokio::sync::OwnedRwLockWriteGuard<()>) {
+        self.youtube.restart_after_update_failure();
+        self.web_media.restart_after_update_failure();
+        drop(admission);
+        self.scheduler.start(self.clone()).await;
+        // A completion event may have been rejected while installation held admission.
+        // Refill still-running queues so an installer failure cannot strand their work.
+        for queue in self.queue_manager.get_all_queues().await {
+            if let Err(error) = self.queue_manager.try_start_next_downloads(self.clone(), queue.id).await {
+                tracing::warn!(%error, "Could not advance queue after installer failure");
+            }
+        }
     }
     
     /// Start a background listener that auto-advances queues when downloads complete/fail/cancel
@@ -948,6 +972,7 @@ impl DlmanCore {
     ) -> Result<Download, DlmanError> {
         use crate::media::MediaResolver;
         use dlman_types::MediaProtocol;
+        let transfer = Arc::new(self.download_manager.admission.enter()?);
 
         // Filter out manifest-like filenames — they're not meaningful names.
         // The extension often sends the manifest filename ("master.m3u8") which is useless.
@@ -1176,6 +1201,7 @@ impl DlmanCore {
         let cancel_for_task = cancel_token.clone();
 
         let join_handle = tokio::spawn(async move {
+            let _transfer = transfer.clone();
             let result = Self::download_hls_segments(
                 &core,
                 download_id,
@@ -1185,10 +1211,12 @@ impl DlmanCore {
                 cookies_clone.as_deref(),
                 referrer_clone.as_deref(),
                 &cancel_for_task,
+                transfer,
             )
             .await;
 
-            // Task is done — remove ourselves from hls_tasks
+            // Segment cancellation ends here. Admission remains held through remuxing
+            // and final persistence even after the cancellable segment task is removed.
             core.hls_tasks.write().await.remove(&download_id);
 
             match result {
@@ -1287,6 +1315,7 @@ impl DlmanCore {
         cookies: Option<&str>,
         referrer: Option<&str>,
         cancel_token: &AtomicBool,
+        transfer: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     ) -> Result<u64, DlmanError> {
         use std::sync::atomic::AtomicU64;
         use std::time::Instant;
@@ -1360,8 +1389,12 @@ impl DlmanCore {
             let cookies_owned = cookies.map(|s| s.to_string());
             let referrer_owned = referrer.map(|s| s.to_string());
             let failed_flag = failed.clone();
+            let transfer = transfer.clone();
 
             join_set.spawn(async move {
+                // A dropped JoinSet requests cancellation; the last child owns admission
+                // until Tokio actually destroys it, even if its parent was aborted first.
+                let _transfer = transfer;
                 let _permit = permit; // held until this task finishes
 
                 let mut last_err = None;

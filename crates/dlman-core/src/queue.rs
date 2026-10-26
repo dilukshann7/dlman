@@ -135,6 +135,7 @@ impl QueueManager {
         queue_id: Uuid,
     ) -> Result<(), DlmanError> {
         // Verify queue exists
+        let _admission = core.download_manager.admission.enter()?;
         let queue = self.get_queue(queue_id).await
             .ok_or(DlmanError::NotFound(queue_id))?;
         
@@ -207,6 +208,7 @@ impl QueueManager {
         queue_id: Uuid,
     ) -> Result<(), DlmanError> {
         // Check if queue is running
+        let _admission = core.download_manager.admission.enter()?;
         if !self.is_running(queue_id).await {
             return Ok(());
         }
@@ -272,5 +274,25 @@ impl QueueManager {
         queue_id: Uuid,
     ) -> Result<(), DlmanError> {
         self.try_start_next_downloads(core, queue_id).await
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn install_denial_does_not_mark_a_running_queue_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::DlmanCore::new(temp.path().to_owned()).await.unwrap();
+        core.scheduler.stop().await;
+        let queue = Uuid::nil();
+        core.queue_manager.running.write().await.insert(queue);
+        let admission = core.download_manager.admission.try_install().unwrap();
+        assert!(core.queue_manager.try_start_next_downloads(core.clone(), queue).await.is_err());
+        assert!(core.queue_manager.is_running(queue).await);
+        drop(admission);
+        core.queue_manager.try_start_next_downloads(core.clone(), queue).await.unwrap();
+        assert!(!core.queue_manager.is_running(queue).await);
     }
 }

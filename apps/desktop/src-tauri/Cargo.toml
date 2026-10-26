@@ -20,6 +20,12 @@ tauri-plugin-shell = "2"
 tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-deep-link = "2"
+# 2.11 checks Windows installer launch failures before exiting (needed for retry).
+tauri-plugin-updater = "=2.11.0"
+reqwest = { workspace = true }
+semver = "1"
+base64 = "0.22"
+minisign-verify = "0.2"
 # tauri-plugin-drag = "2" # DISABLED: Causes crash on macOS "Rust cannot catch foreign exceptions"
 
 tokio = { workspace = true }

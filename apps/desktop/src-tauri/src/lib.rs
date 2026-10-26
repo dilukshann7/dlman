@@ -3,6 +3,7 @@
 //! Tauri-based desktop application for DLMan.
 
 mod autostart;
+mod app_updates;
 mod browser_server;
 mod commands;
 mod log_forward;
@@ -45,6 +46,8 @@ pub fn run() {
 
     builder
         .manage(autostart::SettingsLock::default())
+        .manage(app_updates::AppUpdates::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -139,6 +142,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_updates::check_app_update,
+            app_updates::download_app_update,
+            app_updates::can_install_app_update,
+            app_updates::install_app_update,
             // Download commands
             commands::add_download,
             commands::add_downloads_batch,

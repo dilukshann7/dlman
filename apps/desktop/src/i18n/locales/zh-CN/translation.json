@@ -685,8 +685,16 @@
   },
   "update": {
     "available": "v{{version}} 可用",
-    "clickToDownload": "点击下载最新版本",
-    "download": "下载"
+    "clickToDownload": "打开更新以下载最新版本",
+    "download": "下载更新",
+    "retryDownload": "重试下载",
+    "downloading": "正在下载更新：{{progress}}",
+    "installRestart": "安装并重启",
+    "waitForDownloads": "等待下载和媒体处理完成。重启需要您的确认。",
+    "installing": "正在安装更新…",
+    "packageManager": "请使用软件包管理器更新 DLMan，或从发行页面下载软件包。",
+    "manualInstall": "此版本不支持应用内安装。请从发行页面下载匹配的安装程序。",
+    "releaseNotes": "发行说明和下载"
   },
   "welcome": {
     "addDownload": "添加下载",

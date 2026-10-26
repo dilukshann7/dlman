@@ -43,7 +43,7 @@ export default defineConfig({
   manifest: {
     name: 'DLMan - Download Manager',
     description: 'Intercept browser downloads and send them to DLMan desktop app for faster, resumable downloads with queue management.',
-    version: '1.13.2',
+    version: '1.13.3',
     // Firefox-specific settings - REQUIRED for Firefox Add-ons
     browser_specific_settings: {
       gecko: {
@@ -91,7 +91,7 @@ export default defineConfig({
     },
     web_accessible_resources: [
       {
-        resources: ['icon/*', 'media-hook.js'],
+        resources: ['icon/*', 'fonts/*.woff2', 'media-hook.js'],
         matches: ['<all_urls>'],
       },
     ],
