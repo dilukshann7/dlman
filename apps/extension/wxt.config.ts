@@ -91,7 +91,7 @@ export default defineConfig({
     },
     web_accessible_resources: [
       {
-        resources: ['icon/*', 'media-hook.js'],
+        resources: ['icon/*', 'fonts/*.woff2', 'media-hook.js'],
         matches: ['<all_urls>'],
       },
     ],

@@ -16,6 +16,21 @@ import { playerVisible } from './player-dom';
 const OVERLAY_ATTR = 'data-dlman-overlay-id';
 const Z = 2147483647;
 const dismissed = new Set<string>();
+let overlayFontRegistered = false;
+
+function registerOverlayFont(): void {
+  if (overlayFontRegistered || typeof FontFace === 'undefined' || !document.fonts) return;
+
+  // Register at document scope: @font-face inside a shadow root is not reliable.
+  // A private family name keeps page-provided Inter faces out of the overlay.
+  const url = new URL('fonts/inter-latin-wght-normal.woff2', browser.runtime.getURL('/')).href;
+  document.fonts.add(new FontFace('DLMan Inter', `url("${url}") format("woff2")`, {
+    style: 'normal',
+    weight: '100 900',
+    display: 'swap',
+  }));
+  overlayFontRegistered = true;
+}
 
 // ============================================================================
 // Styles (inside Shadow DOM — fully isolated from host page)
@@ -23,10 +38,11 @@ const dismissed = new Set<string>();
 
 function shadowCSS(): string {
   return `
-:host{all:initial;position:fixed;z-index:${Z};display:block;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+:host{all:initial;position:fixed;z-index:${Z};display:block;pointer-events:none}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
 /* Main pill button */
+.pill{font-family:'DLMan Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-feature-settings:"rlig" 1,"calt" 1;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .pill{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px 0 8px;background:rgba(22,22,22,.92);color:#e8e8e8;font-size:12px;font-weight:600;border:1px solid rgba(255,255,255,.12);border-radius:7px;cursor:pointer;pointer-events:auto;white-space:nowrap;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 2px 12px rgba(0,0,0,.5);opacity:0;transform:translateY(-4px) scale(.96);transition:opacity .25s ease,transform .25s ease,background .15s,border-color .15s;position:relative;user-select:none}
 .pill.show{opacity:1;transform:translateY(0) scale(1)}
 .pill:hover{background:rgba(30,30,30,.96);border-color:rgba(59,130,246,.5)}
@@ -133,6 +149,7 @@ export class VideoOverlayManager {
     const video = targetVideo || this.findVideo(media);
     if (!video) return;
 
+    registerOverlayFont();
     const hasMulti = variants && variants.length > 1;
 
     // Shadow DOM host
