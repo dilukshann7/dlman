@@ -39,7 +39,7 @@ function copyIconsPlugin() {
 export default defineConfig({
   srcDir: 'src',
   outDir: 'dist',
-  publicDir: 'public',
+  publicDir: path.resolve(__dirname, 'public'),
   manifest: {
     name: 'DLMan - Download Manager',
     description: 'Intercept browser downloads and send them to DLMan desktop app for faster, resumable downloads with queue management.',
@@ -98,7 +98,7 @@ export default defineConfig({
   },
   vite: () => ({
     plugins: [react(), copyIconsPlugin()],
-    publicDir: 'public',
+    publicDir: path.resolve(__dirname, 'public'),
     build: {
       target: 'esnext',
     },
