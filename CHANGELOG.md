@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.13.3] - 2026-10-26
+
+### Added
+
+- Signed in-app desktop updates with download progress, signature verification, and an explicit Install and Restart action.
+- Automatic stable-release checks after settings load and every six hours, honoring the existing update-check preference.
+- Verified updater manifests for Windows MSI and NSIS, macOS Intel and Apple Silicon, and Linux AppImage releases.
+
+### Changed
+
+- Wait for download workers, media inspection, and merging to finish before permitting update installation.
+- Preserve verified update packages for installation retries and restore scheduling and media services after installer failures.
+- Verify every updater package and signature before publishing a release, including re-signing the final patched AppImage.
+
+### Fixed
+
+- Bundle the Inter font with browser extensions so webpage video overlays use consistent typography.
+
+### Upgrade notes
+
+- Install v1.13.3 manually to enable in-app installation of future updates. Older versions continue to open the releases page.
+- Linux DEB and RPM installations continue to use their package manager or downloaded release packages.
+
 ## [1.13.2] - 2026-10-25
 
 ### Added
