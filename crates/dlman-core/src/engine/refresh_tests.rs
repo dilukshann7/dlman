@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn partial_samples_cover_start_middle_and_end_without_duplicates() {
+    let mut segment = Segment::new(7, 1000, 100000);
+    segment.downloaded = 20000;
+    assert_eq!(partial_samples(&[segment.clone()]).unwrap(), vec![
+        (7, 1000, 0, 4096), (7, 1000, 10000, 4096), (7, 1000, 15904, 4096),
+    ]);
+    for length in [1, 4096] {
+        segment.downloaded = length;
+        assert_eq!(partial_samples(&[segment.clone()]).unwrap(), vec![(7, 1000, 0, length)]);
+    }
+    segment.downloaded = 0;
+    assert!(partial_samples(&[segment]).unwrap().is_empty());
+}
+
+#[test]
 fn content_ranges_are_exact_and_totals_are_required() {
     assert_eq!(parse_content_range("bytes 5-9/10").unwrap(), (5, 9, 10));
     for value in [

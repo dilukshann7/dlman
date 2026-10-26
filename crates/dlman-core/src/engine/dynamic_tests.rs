@@ -14,6 +14,7 @@ enum Mode {
     Normal,
     GatedDonor,
     RetryChild,
+    RetryChildPrefix,
     WrongChildRange,
     ChangedChildEtag,
     TruncatedChild,
@@ -129,7 +130,11 @@ async fn serve(size: usize, mode: Mode) -> Fixture {
                     };
                     let headers = format!("HTTP/1.1 {status}\r\n{range_header}{length_header}ETag: {etag}\r\nConnection: close\r\n\r\n");
                     if socket.write_all(headers.as_bytes()).await.is_err() { return; }
-                    if child && mode == Mode::RetryChild && !child_failed.swap(true, Ordering::AcqRel) {
+                    if child && matches!(mode, Mode::RetryChild | Mode::RetryChildPrefix) && !child_failed.swap(true, Ordering::AcqRel) {
+                        if mode == Mode::RetryChildPrefix {
+                            let _ = socket.write_all(&body[start as usize..start as usize + 8192]).await;
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                        }
                         return;
                     }
                     let payload = &body[start as usize..=end as usize];
@@ -501,6 +506,32 @@ async fn a_failed_child_retries_its_current_range_without_waiting_for_the_donor(
         .unwrap()
         .unwrap();
     assert_eq!(tokio::fs::read(output).await.unwrap(), *fixture.body);
+}
+
+#[tokio::test]
+async fn interrupted_split_child_retries_after_its_checkpointed_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = serve(12 * MIN_SPLIT_SIZE as usize + 37, Mode::RetryChildPrefix).await;
+    let download = download(root.path(), &fixture.url);
+    let output = download.destination.join(&download.filename);
+    let (task, _) = make_task(root.path(), download, 2).await;
+    let work = tokio::spawn(task.run());
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let ranges = fixture.ranges.lock().await.clone();
+            if ranges.iter().any(|(start, end)| {
+                *start > 0 && *end < fixture.body.len() as u64 / 2
+                    && ranges.contains(&(*start + 8192, *end))
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    fixture.release.notify_one();
+    timeout(Duration::from_secs(10), work).await.unwrap().unwrap().unwrap();
+    assert_eq!(tokio::fs::read(output).await.unwrap(), *fixture.body);
+    assert!(fixture.max_active.load(Ordering::Acquire) <= 2);
 }
 
 #[tokio::test]

@@ -496,6 +496,44 @@ impl DownloadDatabase {
         Ok(())
     }
 
+    /// Persist a whole-file segment's newly discovered size before streaming.
+    /// This changes only transfer-owned fields and cannot replace a split map.
+    pub(crate) async fn record_discovered_size(
+        &self,
+        download_id: Uuid,
+        segment_index: u32,
+        total: u64,
+    ) -> Result<(), DlmanError> {
+        let total = i64::try_from(total)
+            .ok()
+            .filter(|size| *size > 0)
+            .ok_or_else(|| super::refresh::invalid("Invalid discovered file size."))?;
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE downloads SET size = ? WHERE id = ? AND (size IS NULL OR size = ?)",
+        )
+        .bind(total)
+        .bind(download_id.to_string())
+        .bind(total)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() != 1 {
+            return Err(super::refresh::invalid(
+                "Download file size changed; partial data was preserved.",
+            ));
+        }
+        let changed = sqlx::query("UPDATE segments SET end_byte = ? WHERE download_id = ? AND segment_index = ? AND start_byte = 0 AND (end_byte = -1 OR end_byte = ?)")
+            .bind(total - 1).bind(download_id.to_string()).bind(segment_index as i64).bind(total - 1)
+            .execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            return Err(super::refresh::invalid(
+                "Saved segment boundaries are inconsistent.",
+            ));
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Update segment progress
     pub async fn update_segment_progress(
         &self,

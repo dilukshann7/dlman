@@ -117,3 +117,40 @@ async fn observing_pause_marks_the_shared_manager_handle_as_stopping() {
     assert!(matches!(worker.stop_error(), Some(DlmanError::Paused)));
     assert!(worker.cancelled.load(Ordering::Acquire));
 }
+
+#[tokio::test]
+async fn interruption_checkpoints_new_bytes_without_rolling_back_the_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut worker, mut file) = worker(root.path()).await;
+    file.write_all(&[7; 1024]).await.unwrap();
+    worker.segment.downloaded += 1024;
+    worker.downloaded_bytes.fetch_add(1024, Ordering::AcqRel);
+    worker.checkpoint_interrupted(&mut file, 65536).await.unwrap();
+    assert_eq!(file.metadata().await.unwrap().len(), 66560);
+    assert_eq!(worker.downloaded_bytes.load(Ordering::Acquire), 66560);
+    let saved = worker.db.load_download(worker.download_id).await.unwrap().unwrap();
+    assert_eq!(saved.segments[0].downloaded, 66560);
+    assert!(!saved.segments[0].complete);
+}
+
+#[tokio::test]
+async fn interrupted_full_range_cannot_become_complete_on_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut worker, mut file) = worker(root.path()).await;
+    let size = worker.segment.size();
+    file.set_len(size).await.unwrap();
+    worker.downloaded_bytes.store(size, Ordering::Release);
+    worker.segment.downloaded = size;
+    worker.checkpoint_interrupted(&mut file, 65536).await.unwrap();
+    assert_eq!(file.metadata().await.unwrap().len(), 65536);
+    assert_eq!(worker.downloaded_bytes.load(Ordering::Acquire), 65536);
+    let saved = worker.db.load_download(worker.download_id).await.unwrap().unwrap();
+    assert_eq!(saved.segments[0].downloaded, 65536);
+    assert!(!saved.segments[0].complete);
+}
+
+#[test]
+fn premature_eof_is_retryable_but_invalid_content_is_not() {
+    assert!(DlmanError::IncompleteTransfer.is_retryable());
+    assert!(!invalid("Changed content").is_retryable());
+}

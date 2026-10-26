@@ -263,6 +263,7 @@ impl DownloadTask {
         // metadata/status writes and recovers splits whose receiver disappeared.
         if let Some(saved) = self.db.load_download(self.download.id).await? {
             self.download.segments = saved.segments;
+            self.download.size = saved.size;
         }
         self.reconcile_segments().await?;
         if matches!(&failure, Some(DlmanError::Paused))

@@ -2,7 +2,7 @@
 //! Sampling checks compatibility; it is not a complete file identity proof.
 
 use crate::error::DlmanError;
-use dlman_types::{Download, DownloadStatus};
+use dlman_types::{Download, DownloadStatus, Segment};
 use futures::StreamExt;
 use reqwest::{header, Client, Method, Response};
 use serde::Serialize;
@@ -284,6 +284,125 @@ async fn bounded_body(response: Response, expected: usize) -> Result<Vec<u8>, Dl
     Ok(body)
 }
 
+/// Select bounded samples across the retained data, without sampling gaps.
+pub(crate) fn partial_samples(
+    segments: &[Segment],
+) -> Result<Vec<(u32, u64, u64, u64)>, DlmanError> {
+    let retained = segments.iter().try_fold(0u64, |total, segment| {
+        total
+            .checked_add(segment.downloaded)
+            .ok_or_else(|| invalid("Invalid partial segment size."))
+    })?;
+    let mut samples = Vec::new();
+    if retained == 0 {
+        return Ok(samples);
+    }
+    for position in [0, retained / 2, retained - 1] {
+        let mut offset = position;
+        for segment in segments {
+            if offset < segment.downloaded {
+                let length = segment.downloaded.min(4096);
+                let local = offset.min(segment.downloaded - length);
+                let sample = (segment.index, segment.start, local, length);
+                if !samples.contains(&sample) {
+                    samples.push(sample);
+                }
+                break;
+            }
+            offset -= segment.downloaded;
+        }
+    }
+    Ok(samples)
+}
+
+async fn compare_sample(
+    response: Response,
+    path: &Path,
+    local: u64,
+    length: u64,
+) -> Result<(), DlmanError> {
+    let remote = bounded_body(response, length as usize).await?;
+    let mut file = tokio::fs::File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(local)).await?;
+    let mut local_bytes = vec![0; length as usize];
+    file.read_exact(&mut local_bytes).await?;
+    if local_bytes != remote {
+        return Err(invalid(
+            "Replacement bytes do not match the saved file. Partial data was preserved.",
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only verification shared with address refresh. Sampling establishes
+/// compatibility with saved bytes, not a complete proof of file identity.
+pub(crate) struct PartialVerification<'a> {
+    pub client: &'a Client,
+    pub url: &'a str,
+    pub cookies: Option<&'a str>,
+    pub credentials: Option<&'a (String, String)>,
+    pub referrer: Option<&'a str>,
+    pub allow_html: bool,
+}
+
+impl PartialVerification<'_> {
+    pub async fn verify(
+        &self,
+        path: &Path,
+        segment: &Segment,
+        total: u64,
+        mut etag: Option<String>,
+    ) -> Result<Option<String>, DlmanError> {
+        for (_, start, local, length) in partial_samples(std::slice::from_ref(segment))? {
+            let absolute = start
+                .checked_add(local)
+                .ok_or_else(|| invalid("Invalid segment offset."))?;
+            let end = absolute
+                .checked_add(length - 1)
+                .ok_or_else(|| invalid("Invalid segment offset."))?;
+            let response = send_scoped(
+                self.client,
+                Method::GET,
+                self.url,
+                self.cookies,
+                self.credentials,
+                self.referrer,
+                Some(&format!("bytes={absolute}-{end}")),
+                strong_etag(etag.as_deref()),
+            )
+            .await?;
+            validate_response_for_file(&response, self.allow_html)?;
+            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err(invalid(
+                    "Server ignored the byte range; partial data was preserved.",
+                ));
+            }
+            let range = header_text(&response, header::CONTENT_RANGE)
+                .ok_or_else(|| invalid("Missing Content-Range in verification response."))?;
+            if parse_content_range(&range)? != (absolute, end, total) {
+                return Err(invalid(
+                    "Server returned a different verification range or file size.",
+                ));
+            }
+            let actual = header_text(&response, header::ETAG);
+            if let (Some(expected), Some(actual)) =
+                (strong_etag(etag.as_deref()), strong_etag(actual.as_deref()))
+            {
+                if expected != actual {
+                    return Err(invalid(
+                        "Download resource changed; partial data was preserved.",
+                    ));
+                }
+            }
+            if strong_etag(actual.as_deref()).is_some() {
+                etag = actual;
+            }
+            compare_sample(response, path, local, length).await?;
+        }
+        Ok(etag)
+    }
+}
+
 pub(crate) async fn verify_candidate(
     client: &Client,
     mut download: Download,
@@ -333,23 +452,8 @@ pub(crate) async fn verify_candidate(
             "Required partial data is missing; the download was not restarted.",
         ));
     }
-    let mut samples = Vec::new();
-    if retained > 0 {
-        for position in [0, retained / 2, retained - 1] {
-            let mut offset = position;
-            for segment in &download.segments {
-                if offset < segment.downloaded {
-                    let length = segment.downloaded.min(4096);
-                    let local = offset.min(segment.downloaded - length);
-                    if !samples.contains(&(segment.index, segment.start, local, length)) {
-                        samples.push((segment.index, segment.start, local, length));
-                    }
-                    break;
-                }
-                offset -= segment.downloaded;
-            }
-        }
-    } else {
+    let mut samples = partial_samples(&download.segments)?;
+    if retained == 0 {
         samples.push((0, 0, 0, 1));
     }
     let mut total = None;
@@ -434,17 +538,8 @@ pub(crate) async fn verify_candidate(
         if retained == 0 && supports_range {
             bounded_body(response, 1).await?;
         } else if retained > 0 {
-            let remote = bounded_body(response, length as usize).await?;
             let path = cache_dir.join(format!("{}_segment_{}.part", download.id, index));
-            let mut file = tokio::fs::File::open(path).await?;
-            file.seek(std::io::SeekFrom::Start(local)).await?;
-            let mut local_bytes = vec![0; length as usize];
-            file.read_exact(&mut local_bytes).await?;
-            if local_bytes != remote {
-                return Err(invalid(
-                    "Replacement bytes do not match the saved file. Partial data was preserved.",
-                ));
-            }
+            compare_sample(response, &path, local, length).await?;
         }
     }
     if let Some(total) = total {

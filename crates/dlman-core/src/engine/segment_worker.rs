@@ -235,6 +235,22 @@ impl SegmentWorker {
         Ok(())
     }
 
+    async fn checkpoint_interrupted(
+        &mut self,
+        file: &mut tokio::fs::File,
+        original: u64,
+    ) -> Result<(), DlmanError> {
+        // Reconciliation treats a full-length file as complete. Do not let a
+        // response that failed before validated EOF enter that path.
+        if !self.segment.is_unknown_size() && self.segment.downloaded == self.segment.size() {
+            self.rollback_attempt(file, original).await
+        } else {
+            self.checkpoint(file).await?;
+            self.publish_snapshot();
+            Ok(())
+        }
+    }
+
     /// Run the segment download
     pub async fn run(mut self) -> Result<SegmentResult, DlmanError> {
         let result = self.run_inner().await;
@@ -334,83 +350,180 @@ impl SegmentWorker {
         // Apply credentials if available (HTTP Basic Auth).
         // Apply browser cookies if available (session-based auth).
         // Redirect handling scopes both to their original origin.
-        let response = {
-            let request = send_scoped(&self.client, reqwest::Method::GET, &self.url,
-                self.cookies.as_deref(), self.credentials.as_ref(), self.referrer.as_deref(),
-                range.as_deref(), strong_etag(self.etag.as_deref()));
-            tokio::pin!(request);
-            loop {
-                tokio::select! {
-                    result = &mut request => break result?,
-                    _ = control_tick.tick() => {
-                        if let Some(error) = self.stop_error() {
-                            self.checkpoint(&mut file).await?;
-                            return Err(error);
+        let mut verification_etag = self.etag.clone();
+        let mut verified_total = None;
+        let mut sampled = false;
+        let (response, expected_body) = loop {
+            let response = {
+                let request = send_scoped(
+                    &self.client,
+                    reqwest::Method::GET,
+                    &self.url,
+                    self.cookies.as_deref(),
+                    self.credentials.as_ref(),
+                    self.referrer.as_deref(),
+                    range.as_deref(),
+                    strong_etag(verification_etag.as_deref()),
+                );
+                tokio::pin!(request);
+                loop {
+                    tokio::select! {
+                        result = &mut request => break result?,
+                        _ = control_tick.tick() => {
+                            if let Some(error) = self.stop_error() {
+                                self.checkpoint(&mut file).await?;
+                                return Err(error);
+                            }
                         }
                     }
                 }
-            }
-        };
+            };
 
-        // Check response status
-        let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            // Authentication required - extract domain for credential lookup
-            let domain = url::Url::parse(&self.url)
-                .ok()
-                .and_then(|u| u.host_str().map(|h| h.to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
-            
-            return Err(DlmanError::AuthenticationRequired {
-                domain,
-                url: self.url.clone(),
-                status: status.as_u16(),
-            });
-        }
-        if !status.is_success() && status.as_u16() != 206 {
-            return Err(DlmanError::ServerError {
-                status: status.as_u16(),
-                message: format!("Failed to download segment {}", self.segment.index),
-            });
-        }
-        
-        validate_response_for_file(&response, self.allow_html)?;
-        if let (Some(expected), Some(actual)) = (strong_etag(self.etag.as_deref()),
-            strong_etag(response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()))) {
-            if expected != actual { return Err(invalid("Download resource changed; partial data was preserved.")); }
-        }
-        let expected_body;
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            // Try Content-Range first (for 206 responses): "bytes 0-X/12345".
-            let value = response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok())
-                .ok_or_else(|| invalid("Missing Content-Range; partial data was preserved."))?;
-            let (actual_start, actual_end, total) = parse_content_range(value)?;
-            if actual_start != start_byte || (!unknown_size && actual_end != end_byte)
-                || (unknown_size && actual_end != total - 1)
-                || self.expected_total.is_some_and(|expected| expected != total) {
-                return Err(invalid("Server returned a different byte range or file size."));
+            // Check response status
+            let status = response.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                // Authentication required - extract domain for credential lookup
+                let domain = url::Url::parse(&self.url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                return Err(DlmanError::AuthenticationRequired {
+                    domain,
+                    url: self.url.clone(),
+                    status: status.as_u16(),
+                });
             }
-            expected_body = Some(actual_end - actual_start + 1);
-            if unknown_size {
-                self.segment.end = total - 1;
-                discovered_size = Some(total);
+            if !status.is_success() && status.as_u16() != 206 {
+                return Err(DlmanError::ServerError {
+                    status: status.as_u16(),
+                    message: format!("Failed to download segment {}", self.segment.index),
+                });
             }
-        } else if status == reqwest::StatusCode::OK && start_byte == 0 && self.segment.start == 0 {
-            // Try Content-Length for 200 OK responses (full content).
-            // A full response is safe only for a fresh, whole-file segment.
-            let length = response.content_length();
-            if !unknown_size && (length != Some(self.segment.size()) || self.expected_total.is_some_and(|total| total != self.segment.size())) {
-                return Err(invalid("Server ignored a segmented range; partial data was preserved."));
+
+            validate_response_for_file(&response, self.allow_html)?;
+            let response_etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if let (Some(expected), Some(actual)) = (
+                strong_etag(verification_etag.as_deref()),
+                strong_etag(
+                    response
+                        .headers()
+                        .get(reqwest::header::ETAG)
+                        .and_then(|v| v.to_str().ok()),
+                ),
+            ) {
+                if expected != actual {
+                    return Err(invalid(
+                        "Download resource changed; partial data was preserved.",
+                    ));
+                }
             }
-            expected_body = length;
-            if unknown_size {
-                if let Some(total) = length.filter(|n| *n > 0) {
+            let expected_body;
+            let mut response_total = None;
+            if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                // Try Content-Range first (for 206 responses): "bytes 0-X/12345".
+                let value = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| invalid("Missing Content-Range; partial data was preserved."))?;
+                let (actual_start, actual_end, total) = parse_content_range(value)?;
+                if actual_start != start_byte
+                    || (!unknown_size && actual_end != end_byte)
+                    || (unknown_size && actual_end != total - 1)
+                    || self
+                        .expected_total
+                        .is_some_and(|expected| expected != total)
+                    || verified_total.is_some_and(|expected| expected != total)
+                {
+                    return Err(invalid(
+                        "Server returned a different byte range or file size.",
+                    ));
+                }
+                expected_body = Some(actual_end - actual_start + 1);
+                response_total = Some(total);
+                if unknown_size {
                     self.segment.end = total - 1;
                     discovered_size = Some(total);
                 }
+            } else if status == reqwest::StatusCode::OK
+                && start_byte == 0
+                && self.segment.start == 0
+            {
+                // Try Content-Length for 200 OK responses (full content).
+                // A full response is safe only for a fresh, whole-file segment.
+                let length = response.content_length();
+                if !unknown_size
+                    && (length != Some(self.segment.size())
+                        || self
+                            .expected_total
+                            .is_some_and(|total| total != self.segment.size()))
+                {
+                    return Err(invalid(
+                        "Server ignored a segmented range; partial data was preserved.",
+                    ));
+                }
+                expected_body = length;
+                if unknown_size {
+                    if let Some(total) = length.filter(|n| *n > 0) {
+                        self.segment.end = total - 1;
+                        discovered_size = Some(total);
+                    }
+                }
+            } else {
+                return Err(invalid(
+                    "Server ignored a resume range; partial data was preserved.",
+                ));
             }
-        } else { return Err(invalid("Server ignored a resume range; partial data was preserved.")); }
-        self.ready = !unknown_size && status == reqwest::StatusCode::PARTIAL_CONTENT;
+            let confirmed_etag = strong_etag(verification_etag.as_deref())
+                .zip(strong_etag(response_etag.as_deref()))
+                .is_some_and(|(expected, actual)| expected == actual);
+            if existing_size > 0 && !sampled && !confirmed_etag {
+                let total = response_total
+                    .ok_or_else(|| invalid("Cannot verify the resumed file size."))?;
+                // Release the transfer response before sample requests so verification
+                // uses this worker's connection slot. Reopen only after verification.
+                drop(response);
+                let context = super::refresh::PartialVerification {
+                    client: &self.client,
+                    url: &self.url,
+                    cookies: self.cookies.as_deref(),
+                    credentials: self.credentials.as_ref(),
+                    referrer: self.referrer.as_deref(),
+                    allow_html: self.allow_html,
+                };
+                let sample_etag = strong_etag(verification_etag.as_deref())
+                    .or_else(|| strong_etag(response_etag.as_deref()))
+                    .map(str::to_owned);
+                let verification =
+                    context.verify(&self.temp_file_path, &self.segment, total, sample_etag);
+                tokio::pin!(verification);
+                verification_etag = loop {
+                    tokio::select! {
+                        result = &mut verification => break result?,
+                        _ = control_tick.tick() => {
+                            if let Some(error) = self.stop_error() {
+                                self.checkpoint(&mut file).await?;
+                                return Err(error);
+                            }
+                        }
+                    }
+                };
+                verified_total = Some(total);
+                sampled = true;
+                continue;
+            }
+            break (response, expected_body);
+        };
+        if let Some(total) = discovered_size {
+            self.db.record_discovered_size(self.download_id, self.segment.index, total).await?;
+            self.expected_total = Some(total);
+        }
+        self.ready = !unknown_size && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         self.publish_snapshot();
         let mut received = 0u64;
 
@@ -423,7 +536,7 @@ impl SegmentWorker {
             let chunk_result = tokio::select! {
                 _ = control_tick.tick() => {
                     if let Some(error) = self.stop_error() {
-                        self.checkpoint(&mut file).await?;
+                        self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
                         return Err(error);
                     }
                     continue;
@@ -445,14 +558,14 @@ impl SegmentWorker {
             // Check cancellation and pause before processing another chunk.
             // Pausing saves progress and closes the response for a later resume.
             if let Some(error) = self.stop_error() {
-                self.checkpoint(&mut file).await?;
+                self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
                 return Err(error);
             }
 
             let chunk = match chunk_result {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    self.rollback_attempt(&mut file, rollback_checkpoint).await?;
+                    self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
                     return Err(DlmanError::Network(error.without_url()));
                 }
             };
@@ -472,7 +585,7 @@ impl SegmentWorker {
                     _ = &mut acquire => break,
                     _ = control_tick.tick() => {
                         if let Some(error) = self.stop_error() {
-                            self.checkpoint(&mut file).await?;
+                            self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
                             return Err(error);
                         }
                     }
@@ -485,7 +598,7 @@ impl SegmentWorker {
                 }
             }
             if let Some(error) = self.stop_error() {
-                self.checkpoint(&mut file).await?;
+                self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
                 return Err(error);
             }
             let accepted = if self.segment.is_unknown_size() {
@@ -527,8 +640,8 @@ impl SegmentWorker {
         let shortened_complete = !unknown_size && self.segment.end < end_byte
             && self.segment.downloaded == self.segment.size();
         if !shortened_complete && expected_body.is_some_and(|expected| received != expected) {
-            self.rollback_attempt(&mut file, rollback_checkpoint).await?;
-            return Err(invalid("Server truncated the requested segment."));
+            self.checkpoint_interrupted(&mut file, rollback_checkpoint).await?;
+            return Err(DlmanError::IncompleteTransfer);
         }
 
         // Flush and sync to disk

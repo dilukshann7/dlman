@@ -48,6 +48,9 @@ pub enum DlmanError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("Server truncated the requested segment.")]
+    IncompleteTransfer,
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -56,7 +59,7 @@ impl DlmanError {
     /// Check if this error is retryable
     pub fn is_retryable(&self) -> bool {
         match self {
-            DlmanError::Network(_) | DlmanError::Timeout => true,
+            DlmanError::Network(_) | DlmanError::Timeout | DlmanError::IncompleteTransfer => true,
             DlmanError::ServerError { status, .. } => *status >= 500,
             DlmanError::AuthenticationRequired { .. } => true, // Retryable after user provides credentials
             _ => false,
