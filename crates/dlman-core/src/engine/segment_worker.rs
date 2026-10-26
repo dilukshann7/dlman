@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -24,6 +24,18 @@ use uuid::Uuid;
 #[cfg(test)]
 #[path = "segment_worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "segment_write_bench.rs"]
+mod write_bench;
+
+// Tuned by the explicitly ignored disk benchmark in segment_write_bench.rs.
+const SEGMENT_WRITE_BUFFER_SIZE: usize = 512 * 1024;
+type SegmentFile = BufWriter<tokio::fs::File>;
+
+fn buffered_segment_file(file: tokio::fs::File) -> SegmentFile {
+    BufWriter::with_capacity(SEGMENT_WRITE_BUFFER_SIZE, file)
+}
 
 /// Result of a segment download
 pub struct SegmentResult {
@@ -192,18 +204,26 @@ impl SegmentWorker {
         }
     }
 
-    async fn checkpoint(&self, file: &mut tokio::fs::File) -> Result<(), DlmanError> {
+    async fn checkpoint(&self, file: &mut SegmentFile) -> Result<(), DlmanError> {
         file.flush().await?;
-        file.sync_all().await?;
+        file.get_ref().sync_all().await?;
+        self.save_progress().await
+    }
+
+    async fn complete_segment(&mut self, file: &mut SegmentFile) -> Result<(), DlmanError> {
+        // Completion becomes visible only after all accepted bytes are durable.
+        file.flush().await?;
+        file.get_ref().sync_all().await?;
+        self.segment.complete = true;
         self.save_progress().await
     }
 
     async fn handle_split(
         &mut self,
-        file: &mut tokio::fs::File,
+        file: &mut SegmentFile,
         command: SplitCommand,
         rollback_checkpoint: &mut u64,
-    ) {
+    ) -> Result<(), DlmanError> {
         let result = async {
             if !self.ready || self.stop_error().is_some() {
                 return Ok(None);
@@ -214,7 +234,7 @@ impl SegmentWorker {
             // This is a write boundary: no bytes can cross into the child while
             // the donor checkpoint and its new ownership map are committed.
             file.flush().await?;
-            file.sync_all().await?;
+            file.get_ref().sync_all().await?;
             self.db.split_segment(self.download_id, &self.segment, &donor, &child).await?;
             self.segment = donor.clone();
             *rollback_checkpoint = donor.downloaded;
@@ -223,11 +243,22 @@ impl SegmentWorker {
         }.await;
         // A lost acknowledgement cannot undo a committed split. The coordinator
         // drains workers and reloads the persistent map on every terminal path.
-        let _ = command.reply.send(result);
+        match result {
+            // Disk failures must terminate the worker. Dropping the reply lets
+            // the coordinator drain it through the ordinary worker-error path.
+            Err(error @ DlmanError::Io(_)) => Err(error),
+            result => {
+                let _ = command.reply.send(result);
+                Ok(())
+            }
+        }
     }
 
-    async fn rollback_attempt(&mut self, file: &mut tokio::fs::File, original: u64) -> Result<(), DlmanError> {
-        file.set_len(original).await?;
+    async fn rollback_attempt(&mut self, file: &mut SegmentFile, original: u64) -> Result<(), DlmanError> {
+        // Drain before truncating so rejected bytes cannot be flushed back later.
+        file.flush().await?;
+        file.get_mut().set_len(original).await?;
+        file.seek(std::io::SeekFrom::Start(original)).await?;
         self.downloaded_bytes.fetch_sub(self.segment.downloaded - original, Ordering::AcqRel);
         self.segment.downloaded = original;
         self.checkpoint(file).await?;
@@ -237,7 +268,7 @@ impl SegmentWorker {
 
     async fn checkpoint_interrupted(
         &mut self,
-        file: &mut tokio::fs::File,
+        file: &mut SegmentFile,
         original: u64,
     ) -> Result<(), DlmanError> {
         // Reconciliation treats a full-length file as complete. Do not let a
@@ -307,6 +338,7 @@ impl SegmentWorker {
                 );
             }
         }
+        let mut file = buffered_segment_file(file);
         // Reconciliation is normally done by the coordinator, but standalone
         // workers also account for bytes written after the last saved checkpoint.
         self.publish_snapshot();
@@ -547,7 +579,7 @@ impl SegmentWorker {
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.handle_split(&mut file, command, &mut rollback_checkpoint).await;
+                    self.handle_split(&mut file, command, &mut rollback_checkpoint).await?;
                     continue;
                 }
                 chunk = stream.next() => match chunk {
@@ -594,7 +626,7 @@ impl SegmentWorker {
                             Some(commands) => commands.recv().await,
                             None => std::future::pending().await,
                         }
-                    } => self.handle_split(&mut file, command, &mut rollback_checkpoint).await,
+                    } => self.handle_split(&mut file, command, &mut rollback_checkpoint).await?,
                 }
             }
             if let Some(error) = self.stop_error() {
@@ -645,12 +677,8 @@ impl SegmentWorker {
         }
 
         // Flush and sync to disk
-        file.flush().await?;
-        file.sync_all().await?;
-        
         // Mark segment as complete
-        self.segment.complete = true;
-        self.save_progress().await?;
+        self.complete_segment(&mut file).await?;
         
         info!(
             "Segment {} complete ({} bytes)",
